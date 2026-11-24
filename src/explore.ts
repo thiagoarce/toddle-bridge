@@ -16,7 +16,7 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:6,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"breadth-first-rendered-text",visualCandidates:0,duplicates:0,queued:0,attempts:0}};
+const report = {version:7,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -32,6 +32,7 @@ const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.label;
 const seen=new Map<string,number>();
 const stateUrls=new Map<number,string>();
 const stateDialogs=new Map<number,boolean>();
+const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
 let home="";
@@ -135,10 +136,10 @@ async function click(page:Page,a:Action){
       /timeout/i.test(msg)?"native-click-timeout":"native-click-error";
     return false;
   }
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(1400);
   if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";currentPath=null;return false;}
   // Give the client-rendered view a bounded period to finish replacing its shell.
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(900);
   if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
   return true;
 }
@@ -146,9 +147,10 @@ async function click(page:Page,a:Action){
 async function actions(page:Page):Promise<Action[]>{
   const result:Action[]=[];
   const visual=await visualCandidates(page);
+  const inMenu=await page.locator("[role=menu]:visible").count()>0;
   const inDialog=await page.locator("[role=dialog]:visible,dialog[open]:visible").count()>0;
-  if(inDialog){
-    return visual.filter(v=>v.region==="dialog").map(v=>({kind:"visual",label:v.label,region:v.region,opener:v.opener}));
+  if(inMenu||inDialog){
+    return visual.filter(v=>v.region===(inMenu?"menu":"dialog")).map(v=>({kind:"visual",label:v.label,region:v.region,opener:v.opener}));
   }
   if(new URL(page.url()).pathname===new URL(home).pathname){
     const n=Math.min(await page.locator(cardSelector).count(),12);
@@ -189,7 +191,7 @@ async function capture(page:Page){
   report.exploration.visualCandidates+=visual.length;
   // Ignore changes in row counts and loading skeletons when deciding whether to expand a view.
   // Keep URLs only in process memory; the report contains masked routes.
-  const dialog=(snapshot.controls as {control:{role:string}}[]).some(c=>c.control.role==="dialog");
+  const dialog=(snapshot.controls as {control:{role:string}}[]).some(c=>["dialog","menu"].includes(c.control.role));
   const features=(snapshot.controls as {control:{name:string|null;role:string;editable:boolean;type:string|null}}[]).filter(c=>c.control.name||c.control.editable||c.control.role==="dialog"||c.control.role==="textbox").map(c=>JSON.stringify([c.control.role,c.control.name,c.control.editable,c.control.type])).sort();
   const visualSignature=visual.map(v=>v.region+"|"+v.label.toLowerCase()).sort();
   const key=page.url()+"|"+JSON.stringify([...new Set(features)])+"|"+JSON.stringify(visualSignature);
@@ -221,12 +223,21 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     const last=path.at(-1);
     // Inspect creation menus, but stop at actual editable forms and the global calendar.
     if(last?.kind==="calendar")return;
-    if(stateDialogs.get(id)&&await page.locator("[role=dialog] input:not([type=hidden]):not([type=radio]):not([type=checkbox]):visible,[role=dialog] textarea:visible,[role=dialog] [contenteditable=true]:visible").count()>0)return;
-    if(last?.kind==="visual"&&last.opener&&await page.locator("textarea:visible,[contenteditable=true]:visible").count()>0)return;
+    const openMenu=await page.locator("[role=menu]:visible").count()>0;
+    if(!openMenu&&stateDialogs.get(id)&&await page.locator("[role=dialog] input:not([type=hidden]):not([type=radio]):not([type=checkbox]):visible,[role=dialog] textarea:visible,[role=dialog] [contenteditable=true]:visible").count()>0)return;
+    if(!openMenu&&last?.kind==="visual"&&last.opener&&await page.locator("textarea:visible,[contenteditable=true]:visible").count()>0)return;
     expanded.add(id);
     const prior=new Set(path.map(actionName));
     const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
-    if(candidates.length)queue.push({path,id,actions:candidates});
+    if(path.length===1&&last?.kind==="class"&&!process.argv.includes("--all-classes")){
+      const snapshot=report.snapshots[id];
+      const signatures=(snapshot.controls as {control:{role:string;name:string|null;type:string|null;editable:boolean}}[]).map(c=>JSON.stringify([c.control.role,c.control.name,c.control.type,c.control.editable])).sort();
+      const layout=JSON.stringify([snapshot.route,[...new Set(signatures)],candidates.map(actionName).sort()]);
+      if(sampledClassLayouts.has(layout)){report.exploration.equivalentClassLayouts++;await persist();return;}
+      sampledClassLayouts.add(layout);
+    }
+    // Expand open menus first, before replaying the rest of the queue.
+    if(candidates.length){const pending={path,id,actions:candidates};if(openMenu)queue.unshift(pending);else queue.push(pending);}
     report.exploration.queued=queue.length;
   }
   await enqueue(path,id);
