@@ -71,3 +71,13 @@ Somente em conta de teste/demo autorizada e com dados fictícios, feche o navega
 ### Explorer v7
 
 Registra todas as turmas da tela inicial, mas aprofunda apenas uma turma de cada estrutura equivalente por padrão. Use `npm.cmd run map:explore -- --authorized-test-demo --all-classes` para repetir a exploração em todas. Reconhece menus React renderizados fora do diálogo, rótulos ARIA referenciados e texto de componentes personalizados. Prioriza a expansão de menus, tenta hover em Planning/Classroom e utiliza o rótulo visível associado a seletores de visualização quando disponível. A interceptação de rede permanece desativada. Não é OCR e não garante cobertura integral. O relatório continua local e uma nova execução o substitui; preserve uma cópia do relatório anterior, se necessário. Em outro computador, clone/atualize o repositório, instale dependências e autentique-se manualmente no perfil dedicado; não transfira cookies nem o perfil.
+
+### Explorer v8 — checkpoints
+
+Uma execução nova arquiva o relatório e checkpoint anteriores. O checkpoint é atualizado a cada ação processada, com substituição atômica do JSON. O arquivo `.local/reports/toddle-explore-checkpoint.json` contém a fila, mapa estrutural, impressões digitais de estados e caminhos por ações genéricas, sem cookies, tokens ou URLs completas. Para continuar uma execução interrompida, use:
+
+```powershell
+npm.cmd run map:explore -- --authorized-test-demo --resume
+````
+
+Mantenha o mesmo modo de turmas (inclua `--all-classes` novamente se usou essa opção). Na retomada, autentique-se na mesma plataforma de teste autorizada. Em outro PC, clone/atualize, instale as dependências e Chromium, autentique-se manualmente e copie apenas o checkpoint v8 para a pasta `.local/reports`, por transferência privada autorizada. O checkpoint é vinculado à plataforma e cada tela restaurada é comparada com a impressão digital anterior antes da ação; alterações da interface ou ordem de turmas podem invalidar caminhos. Não transfira o perfil de navegador. Os relatórios v6/v7 não contêm uma fila recuperável e não podem ser retomados diretamente. Cada sessão de retomada permite até 80 novos estados e 120 tentativas; o mapa é acumulado e os contadores de rede referem-se à sessão atual. Sem `--resume`, inicia uma exploração nova. Os arquivos permanecem ignorados pelo Git; não faça commit do checkpoint ou dos relatórios. Use `npm.cmd test` para executar os testes locais.
