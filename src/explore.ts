@@ -1,7 +1,7 @@
 import { chromium, type Page, type Locator } from "playwright";
 import { resolve } from "node:path";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { requestAllowed, inPlatform } from "./explore-policy.ts";
+import { inPlatform } from "./explore-policy.ts";
 
 const origin = "https://web.toddleapp.com";
 const homeCards = ["Assignments manager","School announcements","School policies and resources","School library"];
@@ -14,7 +14,7 @@ type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>,allowedKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120}};
+const report = {version:4,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -61,15 +61,6 @@ function errorKind(message:string){
   if(/syntaxerror/i.test(message))return "syntax-error";
   return "other";
 }
-function externalFontAsset(method:string,raw:string,kind:string,nav:boolean){
-  try{
-    const u=new URL(raw);
-    return !nav&&["GET","HEAD"].includes(method)&&u.protocol==="https:"&&!u.username&&!u.password&&["stylesheet","font"].includes(kind)&&hostGroup(raw)==="font-provider";
-  }catch{return false;}
-}
-
-
-
 async function find(page:Page,a:Action):Promise<Locator|null>{
   if(a.kind==="class"){
     if(new URL(page.url()).pathname!==new URL(home).pathname)return null;
@@ -165,7 +156,7 @@ async function capture(page:Page){
   const id=report.snapshots.length;
   report.snapshots.push(snapshot);seen.set(key,id);
   await persist();
-  console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests blocked: "+report.network.blocked);
+  console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests observed: "+report.network.observed);
   return {id,fresh:true};
 }
 
@@ -206,25 +197,15 @@ if(!process.argv.includes("--authorized-test-demo")){
   console.error("Only for authorized test/demo environments with fictitious data. Use --authorized-test-demo.");
   process.exitCode=1;
 }else{
-  const context=await chromium.launchPersistentContext(resolve(".local","browser-profile"),{headless:false,serviceWorkers:"block",acceptDownloads:false});
+  const context=await chromium.launchPersistentContext(resolve(".local","browser-profile"),{headless:false,acceptDownloads:false});
   try{
-    // Register before opening the exploration page. All unknown write methods fail closed.
-    await context.route("**/*",async route=>{
-      const req=route.request();
-      let body:unknown=null;
-      if(req.method()==="POST"){try{body=req.postDataJSON();}catch{}}
-      const nav=req.isNavigationRequest();
-      const scopeOK=!nav||!platformId||inPlatform(req.url(),origin,platformId);
-      const kind=req.resourceType();
+    // Supervised navigation: observe only aggregate request metadata; do not intercept traffic.
+    console.log("Supervised demo exploration: no network interception. Close the explorer tab to stop.");
+    context.on("request",req=>{
       const method=["GET","HEAD","POST","OPTIONS","PUT","PATCH","DELETE"].includes(req.method())?req.method():"OTHER";
-      const key=method+" "+kind+" "+hostGroup(req.url());
-      if(scopeOK&&(requestAllowed(req.method(),req.url(),body,origin,nav)||externalFontAsset(req.method(),req.url(),kind,nav))){
-        report.network.allowed++;bump(report.network.allowedKinds,key);await route.continue();
-      }else{
-        report.network.blocked++;bump(report.network.blockedKinds,key);await route.abort("blockedbyclient");
-      }
+      report.network.observed++;
+      bump(report.network.requestKinds,method+" "+req.resourceType()+" "+hostGroup(req.url()));
     });
-    await context.routeWebSocket("**/*",ws=>{report.network.websocketsBlocked++;void ws.close();});
     const page=await context.newPage();
     page.on("close",()=>{halted=true;});
     page.on("pageerror",err=>bump(report.startup.pageErrors,errorKind(err.message)));
@@ -274,8 +255,7 @@ if(!process.argv.includes("--authorized-test-demo")){
     console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
   }finally{
     await persist();await context.close().catch(()=>{});
-    console.log("Captured "+report.snapshots.length+" states; "+report.network.blocked+" requests blocked.");
-    console.log("Blocked request categories: "+JSON.stringify(report.network.blockedKinds));
+    console.log("Captured "+report.snapshots.length+" states; "+report.network.observed+" requests observed (no interception).");
     console.log("Review and share only "+output);
   }
 }
