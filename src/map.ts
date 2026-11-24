@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 
 const categories = ["home","classes","planning","lesson-plan","activities","assignment","announcements","messages","calendar","resources","other"];
 const labels = [
-  "Courses","My courses","Course","Home","Dashboard","Classes","Class","Classroom","Planning","Planner","Unit planner",
+  "School announcements","Assignments manager","School policies and resources","School library","Courses","My courses","Course","Home","Dashboard","Classes","Class","Classroom","Planning","Planner","Unit planner",
   "Lesson plan","Lesson plans","Learning experiences","Learning experience","Learning engagements",
   "Activities","Activity","Assignments","Assignment","Assessment","Assessments","Class stream",
   "Stream","Announcements","Announcement","Messages","Message","Messaging","Calendar","Resources",
@@ -23,6 +23,7 @@ const reportDir = resolve(".local","reports");
 await mkdir(reportDir, { recursive: true });
 const terminal = createInterface({ input: process.stdin, output: process.stdout });
 const auto = process.argv.includes("--auto");
+const watch = process.argv.includes("--watch");
 const captureSource = await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
 type CaptureResult = { scanned: number; truncated: boolean; controls: unknown[]; candidates: {name:string;href:string}[] } | null;
 function diagnostic(error: unknown) {
@@ -37,8 +38,8 @@ function diagnostic(error: unknown) {
   if (/EACCES|EPERM|ENOSPC/i.test(message)) return "report-write-error";
   return "unknown-capture-error";
 }
-const report = { version: 2, mode: auto ? "automatic-bounded" : "guided-read-only", snapshots: [] as unknown[], diagnostics: [] as string[], edges: [] as { from: number; to: number; label: string }[], skipped: { invalid: 0, failed: 0, duplicate: 0, limit: 0 } };
-const reportPath = resolve(reportDir,auto ? "toddle-map-auto.json" : "toddle-map.json");
+const report = { version: 2, mode: auto ? "automatic-bounded" : watch ? "passive-watch" : "guided-read-only", snapshots: [] as unknown[], diagnostics: [] as string[], edges: [] as { from: number; to: number; label: string }[], skipped: { invalid: 0, failed: 0, duplicate: 0, limit: 0 } };
+const reportPath = resolve(reportDir,auto ? "toddle-map-auto.json" : watch ? "toddle-map-watch.json" : "toddle-map.json");
 let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
 
 function shape(path: string) {
@@ -88,6 +89,7 @@ try {
         return u.href;
       } catch { return null; }
     }
+    const seen = new Set<string>();
     async function capture(page: import("playwright").Page, category: string) {
       try {
         const url = new URL(page.url());
@@ -96,6 +98,9 @@ try {
         if (!data || new URL(page.url()).origin !== allowed.origin || (auto && !safeUrl(page.url()))) { console.log("Origin or route changed; discarded."); return null; }
         const {candidates, ...structure} = data;
         const snapshot = { category, route: shape(url.pathname), fragmentRoute: url.hash.startsWith("#/") ? shape(url.hash.slice(1).split("?")[0]) : null, ...structure };
+        const signature = JSON.stringify(snapshot);
+        if (watch && seen.has(signature)) return candidates;
+        seen.add(signature);
         report.snapshots.push(snapshot);
         await persist();
         console.log("Captured " + data.controls.length + " control signatures. Total: " + report.snapshots.length);
@@ -151,6 +156,21 @@ try {
         } catch { report.skipped.failed++; console.log("Page unavailable; skipped."); }
       }
       report.skipped.limit+=queue.length;
+    } else if (watch) {
+      console.log("Open an approved overview or empty editor. Avoid individual student records and private conversations.");
+      if ((await terminal.question("Ready to observe a single approved tab? Type SIM: ")).trim() !== "SIM") throw new Error("Cancelled.");
+      const tabs=pages();
+      if(tabs.length!==1) throw new Error("Leave exactly one approved Toddle tab open.");
+      const page=tabs[0];
+      console.log("Navigate manually in the browser. Captures happen automatically. Press Enter in the terminal to finish.");
+      let stop=false;
+      const finish=terminal.question("").then(()=>{stop=true;});
+      while(!stop && !page.isClosed() && report.snapshots.length<100) {
+        if(pages().includes(page)) await capture(page,"observed");
+        await new Promise(resolve=>setTimeout(resolve,1500));
+      }
+      if(!stop) terminal.close();
+      await finish.catch(()=>{});
     } else {
       console.log("Navigate manually. Do not enter student or recipient details. Use empty forms or test data.");
       console.log("Categories: " + categories.join(", "));
