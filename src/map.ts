@@ -5,7 +5,7 @@ import { createInterface } from "node:readline/promises";
 
 const categories = ["home","classes","planning","lesson-plan","activities","assignment","announcements","messages","calendar","resources","other"];
 const labels = [
-  "Home","Dashboard","Classes","Class","Classroom","Planning","Planner","Unit planner",
+  "Courses","My courses","Course","Home","Dashboard","Classes","Class","Classroom","Planning","Planner","Unit planner",
   "Lesson plan","Lesson plans","Learning experiences","Learning experience","Learning engagements",
   "Activities","Activity","Assignments","Assignment","Assessment","Assessments","Class stream",
   "Stream","Announcements","Announcement","Messages","Message","Messaging","Calendar","Resources",
@@ -18,7 +18,7 @@ const labels = [
   "Planejamento","Turmas","Atividades","Avisos","Mensagens","Calendário","Criar","Salvar",
   "Publicar","Enviar","Título","Descrição","Anexar","Cancelar","Editar","Próximo","Voltar"
 ];
-const routeWords = ["home","dashboard","class","classes","classroom","planning","planner","plans","lesson","lessons","lesson-plan","lesson-plans","unit","units","activity","activities","assignment","assignments","announcement","announcements","message","messages","calendar","resources","teacher","teachers","stream","create","new","edit","view","settings","school","schools","app","learning","assessment","assessments","curriculum"];
+const routeWords = ["platform","course","courses","home","dashboard","class","classes","classroom","planning","planner","plans","lesson","lessons","lesson-plan","lesson-plans","unit","units","activity","activities","assignment","assignments","announcement","announcements","message","messages","calendar","resources","teacher","teachers","stream","create","new","edit","view","settings","school","schools","app","learning","assessment","assessments","curriculum"];
 const reportDir = resolve(".local","reports");
 await mkdir(reportDir, { recursive: true });
 const terminal = createInterface({ input: process.stdin, output: process.stdout });
@@ -54,18 +54,22 @@ try {
     });
     // Automatic navigation is limited to known overview routes. No queries,
     // action routes, individual records, messages, or unknown path words.
-    const allowedSegments = new Set(["home","dashboard","class","classes","classroom","planning","planner","plans","lesson","lessons","lesson-plan","lesson-plans","unit","units","activity","activities","assignment","assignments","announcement","announcements","calendar","resources","teacher","teachers","stream","school","schools","app","learning","assessment","assessments","curriculum","overview","portal","learning-experiences","learning-engagements","class-stream","teacher-portal","classroom-stream","unit-planner","lesson-planner"]);
+    const allowedSegments = new Set(["platform","course","courses","home","dashboard","class","classes","classroom","planning","planner","plans","lesson","lessons","lesson-plan","lesson-plans","unit","units","activity","activities","assignment","assignments","announcement","announcements","calendar","resources","teacher","teachers","stream","school","schools","app","learning","assessment","assessments","curriculum","overview","portal","learning-experiences","learning-engagements","class-stream","teacher-portal","classroom-stream","unit-planner","lesson-planner"]);
+    let platformScope: string | null = null;
     function safeUrl(raw: string): string | null {
       try {
         const u = new URL(raw);
         if (u.origin !== allowed.origin || u.username || u.password || u.search) return null;
         if (u.hash && !u.hash.startsWith("#/")) return null;
+        const platformMatch = u.pathname.match(/^\/platform\/([0-9]{1,18})(?:\/|$)/i);
+        if (platformScope && platformMatch && platformMatch[1] !== platformScope) return null;
+        if (u.pathname.toLowerCase().startsWith("/platform/") && !platformMatch) return null;
         const segments = (u.pathname + (u.hash ? u.hash.slice(1) : "")).split("/").filter(Boolean);
         if (segments.length > 16 || segments.some(x => !allowedSegments.has(x.toLowerCase()) && !/^(?:[0-9]{1,18}|[a-f0-9]{24}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.test(x))) return null;
         // Don't traverse individual records: opaque IDs may appear only
         // after explicitly class/school container segments.
         for(let i=0;i<segments.length;i++) {
-          if (!allowedSegments.has(segments[i].toLowerCase()) && !["class","classes","classroom","school","schools"].includes((segments[i-1]??"").toLowerCase())) return null;
+          if (!allowedSegments.has(segments[i].toLowerCase()) && !["platform","course","courses","class","classes","classroom","school","schools"].includes((segments[i-1]??"").toLowerCase())) return null;
         }
         return u.href;
       } catch { return null; }
@@ -122,7 +126,7 @@ try {
             if (entry) entry.count++;
             else if (counts.size < 250) counts.set(key,{control,count:1});
           }
-          const navigationNames = new Set(["home","dashboard","classes","class","classroom","planning","planner","unit planner","lesson plans","learning experiences","learning engagements","activities","assignments","class stream","stream","announcements","calendar","resources","planejamento","turmas","atividades","avisos","calendário"]);
+          const navigationNames = new Set(["courses","my courses","course","home","dashboard","classes","class","classroom","planning","planner","unit planner","lesson plans","learning experiences","learning engagements","activities","assignments","class stream","stream","announcements","calendar","resources","planejamento","turmas","atividades","avisos","calendário"]);
           const candidates = Array.from(document.querySelectorAll("a[href]")).filter(el => el.getClientRects().length && !el.closest("[hidden],[aria-hidden=true],[download]")).slice(0,500).flatMap(el => {
             const name = label(el.getAttribute("aria-label")) ?? label(el.textContent) ?? label(el.getAttribute("title"));
             const href = el.getAttribute("href");
@@ -147,6 +151,8 @@ try {
       const tabs = pages();
       if (!tabs.length) throw new Error("Open an approved tab first.");
       const page = tabs[tabs.length-1];
+      const startPlatform = new URL(page.url()).pathname.match(/^\/platform\/([0-9]{1,18})(?:\/|$)/i);
+      platformScope = startPlatform?.[1] ?? null;
       const initial = safeUrl(page.url());
       if (!initial) throw new Error("Starting route is outside the automatic allowlist. Use guided mode.");
       const max = 30;
@@ -165,6 +171,7 @@ try {
           if(page.url()!==next.url) await page.goto(next.url,{waitUntil:"domcontentloaded",timeout:20000});
           await page.waitForTimeout(1500);
           if (!safeUrl(page.url())) { report.skipped.invalid++; break; }
+          if (!platformScope) platformScope = new URL(page.url()).pathname.match(/^\/platform\/([0-9]{1,18})(?:\/|$)/i)?.[1] ?? null;
           const category = next.label==="Start" ? "home" : "auto";
           const candidates = await capture(page,category);
           if(!candidates) { report.skipped.failed++; continue; }
