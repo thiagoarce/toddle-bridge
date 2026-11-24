@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "login": "tsx src/login.ts",
-    "test": "tsx --test src/draft.test.ts"
+    "test": "tsx --test src/draft.test.ts",
+    "map": "tsx src/map.ts"
   },
   "dependencies": {
     "fastify": "^5.0.0",
