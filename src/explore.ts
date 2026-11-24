@@ -1,0 +1,160 @@
+import { chromium, type Page, type Locator } from "playwright";
+import { resolve } from "node:path";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { requestAllowed, inPlatform } from "./explore-policy.ts";
+
+const origin = "https://web.toddleapp.com";
+const homeCards = ["Assignments manager","School announcements","School policies and resources","School library"];
+const tabs = ["Planning","Planner","Unit planner","Lesson plans","Learning experiences","Learning engagements","Activities","Assignments","Class stream","Stream","Announcements","Calendar","Resources","Overview","Units","Lessons","Curriculum"];
+const labels = [...homeCards,...tabs,"Home","Courses","My courses","Create","Add","Edit","Save","Publish","Send","Students","Messaging","Create announcement","Create assignment","Add attachment","Title","Description","Instructions","Due date","Start date","End date","Date","Time","More options","Cancel","Close","Search","Filter","Draft","New","Schedule"];
+const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
+const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
+const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
+type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"; label:string};
+type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
+type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
+const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0},limits:{states:40,depth:4,attempts:70}};
+const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
+const output=resolve(dir,"toddle-map-explore.json");
+const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
+const persist=()=>writeFile(output,JSON.stringify(report,null,2)+"\n",{encoding:"utf8",mode:0o600});
+const shape=(url:string)=>"/"+new URL(url).pathname.split("/").filter(Boolean).slice(0,30).map(x=>routeWords.includes(x.toLowerCase())?x.toLowerCase():":segment").join("/");
+const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.label;
+const seen=new Map<string,number>();
+let attempts=0;
+let platformId="";
+let home="";
+let halted=false;
+
+
+async function find(page:Page,a:Action):Promise<Locator|null>{
+  if(a.kind==="class"){
+    if(new URL(page.url()).pathname!==new URL(home).pathname)return null;
+    return page.locator(cardSelector).nth(a.index);
+  }
+  if(a.kind==="feature"){
+    if(new URL(page.url()).pathname!==new URL(home).pathname)return null;
+    const cards=page.locator(featureSelector);
+    const exact=cards.filter({has:page.getByText(a.label,{exact:true})});
+    if(await exact.count()===1)return exact;
+    const byRole=page.getByRole("button",{name:a.label,exact:true}).and(cards);
+    return await byRole.count()===1?byRole:null;
+  }
+  if(a.kind==="calendar"){
+    const loc=page.getByRole("button",{name:"Calendar",exact:true});
+    return await loc.count()===1?loc:null;
+  }
+  const loc=page.getByRole("tab",{name:a.label,exact:true});
+  return await loc.count()===1?loc:null;
+}
+
+async function click(page:Page,a:Action){
+  const loc=await find(page,a);
+  if(!loc||!(await loc.isVisible())||!(await loc.isEnabled()))return false;
+  // Never click an editor, form, menu of actions or a disabled control.
+  const ok=await loc.evaluate('(el) => !el.closest("form,[contenteditable=true],[role=dialog],[role=menu],[role=toolbar]") && !el.matches("button[type=submit],button[type=reset],[aria-disabled=true],[disabled]")');
+  if(!ok)return false;
+  await loc.scrollIntoViewIfNeeded({timeout:3000});
+  // Ensure click point belongs to the chosen navigation control rather than a nested action.
+  const point=await loc.evaluate('(el) => { const r=el.getBoundingClientRect(); for(const f of [0.5,0.25,0.75]) {const x=r.width*f,y=r.height*0.5;const h=document.elementFromPoint(r.left+x,r.top+y);if(h && el.contains(h) && (h===el || h.closest("button,a,input,[role=button],[role=tab],[role=menuitem]")===el))return {x,y};}return null;}');
+  if(!point)return false;
+  await loc.click({position:point,timeout:4000});
+  await page.waitForTimeout(1800);
+  if(!inPlatform(page.url(),origin,platformId)){halted=true;return false;}
+  return true;
+}
+
+async function actions(page:Page):Promise<Action[]>{
+  const result:Action[]=[];
+  if(new URL(page.url()).pathname===new URL(home).pathname){
+    const n=Math.min(await page.locator(cardSelector).count(),12);
+    for(let index=0;index<n;index++)result.push({kind:"class",index});
+    for(const label of homeCards)result.push({kind:"feature",label});
+    result.push({kind:"calendar",label:"Calendar"});
+  }else{
+    for(const label of tabs)result.push({kind:"tab",label});
+  }
+  const available:Action[]=[];
+  for(const a of result){const loc=await find(page,a);if(loc && await loc.isVisible() && await loc.isEnabled())available.push(a);}
+  return available;
+}
+
+async function capture(page:Page){
+  if(!inPlatform(page.url(),origin,platformId))return null;
+  const expr=source+"("+JSON.stringify({approvedOrigin:origin,labels,routeWords})+")";
+  const data=await page.evaluate(expr) as Capture;
+  if(!data||!inPlatform(page.url(),origin,platformId))return null;
+  const snapshot:Snapshot={route:shape(page.url()),scanned:data.scanned,truncated:data.truncated,controls:data.controls};
+  const key=page.url()+"|"+JSON.stringify(snapshot);
+  if(seen.has(key))return {id:seen.get(key)!,fresh:false};
+  const id=report.snapshots.length;
+  report.snapshots.push(snapshot);seen.set(key,id);
+  await persist();
+  console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests blocked: "+report.network.blocked);
+  return {id,fresh:true};
+}
+
+async function restore(page:Page,path:Action[]){
+  await page.goto(home,{waitUntil:"domcontentloaded",timeout:25000});
+  await page.waitForTimeout(2000);
+  if(!inPlatform(page.url(),origin,platformId)){halted=true;return false;}
+  for(const a of path){if(!await click(page,a))return false;}
+  return true;
+}
+
+async function explore(page:Page,path:Action[],id:number):Promise<void>{
+  if(halted||path.length>=report.limits.depth)return;
+  const candidates=await actions(page);
+  for(const a of candidates){
+    if(halted||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
+    attempts++;
+    try {
+      if(!await restore(page,path)||!await click(page,a)){
+        report.diagnostics.push({action:actionName(a),reason:"navigation-unavailable-or-outside-scope"});await persist();continue;
+      }
+      const item=await capture(page);
+      if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});await persist();continue;}
+      report.edges.push({from:id,to:item.id,action:actionName(a)});await persist();
+      if(item.fresh)await explore(page,[...path,a],item.id);
+    }catch{report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-error"});await persist();}
+  }
+}
+
+if(!process.argv.includes("--authorized-test-demo")){
+  console.error("Only for authorized test/demo environments with fictitious data. Use --authorized-test-demo.");
+  process.exitCode=1;
+}else{
+  const context=await chromium.launchPersistentContext(resolve(".local","browser-profile"),{headless:false,serviceWorkers:"block",acceptDownloads:false});
+  try{
+    // Register before opening the exploration page. All unknown write methods fail closed.
+    await context.route("**/*",async route=>{
+      const req=route.request();
+      let body:unknown=null;
+      if(req.method()==="POST"){try{body=req.postDataJSON();}catch{}}
+      const nav=req.isNavigationRequest();
+      const scopeOK=!nav||!platformId||inPlatform(req.url(),origin,platformId);
+      if(scopeOK&&requestAllowed(req.method(),req.url(),body,origin,nav)){report.network.allowed++;await route.continue();}
+      else{report.network.blocked++;await route.abort("blockedbyclient");}
+    });
+    await context.routeWebSocket("**/*",ws=>{report.network.websocketsBlocked++;void ws.close();});
+    const page=await context.newPage();
+    // Reuse an existing approved overview URL only in memory, otherwise open Toddle.
+    const initial=context.pages().find(p=>p!==page&&new RegExp("^https://web\\.toddleapp\\.com/platform/[0-9]+/courses/?$").test(p.url()))?.url()??origin+"/";
+    await page.goto(initial,{waitUntil:"domcontentloaded",timeout:30000});
+    await page.waitForURL(u=>u.origin===origin&&/^\/platform\/[0-9]+(?:\/|$)/.test(u.pathname),{timeout:30000});
+    const m=new URL(page.url()).pathname.match(/^\/platform\/([0-9]+)/);
+    if(!m)throw new Error("No authenticated platform");
+    platformId=m[1];home=origin+"/platform/"+platformId+"/courses";
+    await restore(page,[]);
+    await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:20000});
+    const initialState=await capture(page);
+    if(initialState)await explore(page,[],initialState.id);
+  }catch{
+    report.diagnostics.push({action:"startup",reason:"startup-blocked-or-session-expired"});
+    console.log("Startup could not load. No permissions are relaxed. Use manual login first in a test account.");
+  }finally{
+    await persist();await context.close();
+    console.log("Captured "+report.snapshots.length+" states; "+report.network.blocked+" requests blocked.");
+    console.log("Review and share only "+output);
+  }
+}
