@@ -25,6 +25,22 @@ let attempts=0;
 let platformId="";
 let home="";
 let halted=false;
+let currentPath: string|null=null;
+let failureReason="unknown";
+const pathKey=(path:Action[])=>JSON.stringify(path);
+async function waitForHome(page:Page){
+  await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:25000});
+}
+async function waitForControl(page:Page,a:Action){
+  for(let i=0;i<24;i++){
+    if(!inPlatform(page.url(),origin,platformId))return null;
+    const loc=await find(page,a);
+    if(loc && await loc.isVisible() && await loc.isEnabled())return loc;
+    await page.waitForTimeout(500);
+  }
+  return null;
+}
+
 function hostGroup(raw:string){
   try{
     const h=new URL(raw).hostname;
@@ -75,18 +91,21 @@ async function find(page:Page,a:Action):Promise<Locator|null>{
 }
 
 async function click(page:Page,a:Action){
-  const loc=await find(page,a);
-  if(!loc||!(await loc.isVisible())||!(await loc.isEnabled()))return false;
+  const loc=await waitForControl(page,a);
+  if(!loc){failureReason="control-not-ready";return false;}
   // Never click an editor, form, menu of actions or a disabled control.
   const ok=await loc.evaluate('(el) => !el.closest("form,[contenteditable=true],[role=dialog],[role=menu],[role=toolbar]") && !el.matches("button[type=submit],button[type=reset],[aria-disabled=true],[disabled]")');
-  if(!ok)return false;
+  if(!ok){failureReason="control-excluded-by-safety-policy";return false;}
   await loc.scrollIntoViewIfNeeded({timeout:3000});
   // Ensure click point belongs to the chosen navigation control rather than a nested action.
   const point=await loc.evaluate('(el) => { const r=el.getBoundingClientRect(); for(const f of [0.5,0.25,0.75]) {const x=r.width*f,y=r.height*0.5;const h=document.elementFromPoint(r.left+x,r.top+y);if(h && el.contains(h) && (h===el || h.closest("button,a,input,[role=button],[role=tab],[role=menuitem]")===el))return {x,y};}return null;}');
-  if(!point)return false;
+  if(!point){failureReason="safe-click-point-unavailable";return false;}
   await loc.click({position:point,timeout:4000});
-  await page.waitForTimeout(1800);
-  if(!inPlatform(page.url(),origin,platformId)){halted=true;return false;}
+  await page.waitForTimeout(2500);
+  if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
+  // Give the client-rendered view a bounded period to finish replacing its shell.
+  await page.waitForTimeout(1500);
+  if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
   return true;
 }
 
@@ -121,10 +140,13 @@ async function capture(page:Page){
 }
 
 async function restore(page:Page,path:Action[]){
+  if(currentPath===pathKey(path)&&inPlatform(page.url(),origin,platformId))return true;
+  currentPath=null;
   await page.goto(home,{waitUntil:"domcontentloaded",timeout:25000});
-  await page.waitForTimeout(2000);
-  if(!inPlatform(page.url(),origin,platformId)){halted=true;return false;}
+  await waitForHome(page);
+  if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="restore-outside-approved-scope";return false;}
   for(const a of path){if(!await click(page,a))return false;}
+  currentPath=pathKey(path);
   return true;
 }
 
@@ -134,15 +156,19 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
   for(const a of candidates){
     if(halted||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
     attempts++;
+    failureReason="unknown";
+    console.log("Exploring "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
     try {
       if(!await restore(page,path)||!await click(page,a)){
-        report.diagnostics.push({action:actionName(a),reason:"navigation-unavailable-or-outside-scope"});await persist();continue;
+        currentPath=null;
+        report.diagnostics.push({action:actionName(a),reason:failureReason});console.log("Skipped: "+failureReason);await persist();continue;
       }
+      currentPath=pathKey([...path,a]);
       const item=await capture(page);
       if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});await persist();continue;}
       report.edges.push({from:id,to:item.id,action:actionName(a)});await persist();
       if(item.fresh)await explore(page,[...path,a],item.id);
-    }catch{report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-error"});await persist();}
+    }catch(err){currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});await persist();}
   }
 }
 
@@ -202,7 +228,8 @@ if(!process.argv.includes("--authorized-test-demo")){
     report.startup.stage="restore-home";
     if(page.url()!==home)await restore(page,[]);
     report.startup.stage="wait-cards";
-    await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:20000});
+    await waitForHome(page);
+    currentPath=pathKey([]);
     report.startup.stage="capture-home";
     const initialState=await capture(page);
     report.startup.stage=initialState?"explore":"capture-empty";
