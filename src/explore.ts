@@ -5,15 +5,16 @@ import { requestAllowed, inPlatform } from "./explore-policy.ts";
 
 const origin = "https://web.toddleapp.com";
 const homeCards = ["Assignments manager","School announcements","School policies and resources","School library"];
-const tabs = ["Planning","Planner","Unit planner","Lesson plans","Learning experiences","Learning engagements","Activities","Assignments","Class stream","Stream","Announcements","Calendar","Resources","Overview","Units","Lessons","Curriculum"];
-const labels = [...homeCards,...tabs,"Home","Courses","My courses","Create","Add","Edit","Save","Publish","Send","Students","Messaging","Create announcement","Create assignment","Add attachment","Title","Description","Instructions","Due date","Start date","End date","Date","Time","More options","Cancel","Close","Search","Filter","Draft","New","Schedule"];
+const tabs = ["Planning","Planner","Unit planner","Unit planning","Lesson planner","Lesson planning","Lesson plans","Learning experiences","Learning engagements","Activities","Assignments","Assignments manager","Class stream","Stream","Announcements","School announcements","Calendar","Resources","Overview","Units","Lessons","Curriculum","Classroom","Class timetable","Timetable","Weekly planner","Daily planner","Yearly planner","Learning plan","Learning goals","Class resources","Course resources","My planning","All assignments","Upcoming","Past","Drafts","Published","Scheduled","List view","Calendar view","Week view","Day view"];
+const labels = [...homeCards,...tabs,"Create activity","Create lesson plan","Home","Courses","My courses","Create","Add","Edit","Save","Publish","Send","Students","Messaging","Create announcement","Create assignment","Add attachment","Title","Description","Instructions","Due date","Start date","End date","Date","Time","More options","Cancel","Close","Search","Filter","Draft","New","Schedule"];
 const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
 const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
 const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
-type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"; label:string};
+type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string};
+const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>,allowedKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:40,depth:4,attempts:70}};
+const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>,allowedKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -86,7 +87,18 @@ async function find(page:Page,a:Action):Promise<Locator|null>{
     const loc=page.getByRole("button",{name:"Calendar",exact:true});
     return await loc.count()===1?loc:null;
   }
-  const loc=page.getByRole("tab",{name:a.label,exact:true});
+  if(a.kind==="tab"){
+    const loc=page.getByRole("tab",{name:a.label,exact:true});
+    return await loc.count()===1?loc:null;
+  }
+  if(a.kind==="editor"){
+    const loc=page.getByRole("button",{name:a.label,exact:true});
+    return await loc.count()===1?loc:null;
+  }
+  // Many Toddle navigation controls are buttons, links or menuitems rather than ARIA tabs.
+  const loc=page.getByRole("button",{name:a.label,exact:true})
+    .or(page.getByRole("link",{name:a.label,exact:true}))
+    .or(page.getByRole("menuitem",{name:a.label,exact:true}));
   return await loc.count()===1?loc:null;
 }
 
@@ -107,7 +119,6 @@ async function click(page:Page,a:Action){
   // The selected locator is an explicitly allowed navigation control.
   // Use Playwright's native actionability checks, not a custom hit-test.
   try {
-    await loc.click({trial:true,timeout:10000});
     await loc.click({timeout:10000});
   } catch(err) {
     const msg=err instanceof Error?err.message:"";
@@ -135,7 +146,8 @@ async function actions(page:Page):Promise<Action[]>{
     for(const label of homeCards)result.push({kind:"feature",label});
     result.push({kind:"calendar",label:"Calendar"});
   }else{
-    for(const label of tabs)result.push({kind:"tab",label});
+    for(const label of tabs){result.push({kind:"tab",label});result.push({kind:"navigation",label});}
+    for(const label of editorOpeners)result.push({kind:"editor",label});
   }
   const available:Action[]=[];
   for(const a of result){const loc=await find(page,a);if(loc && await loc.isVisible() && await loc.isEnabled())available.push(a);}
@@ -169,10 +181,10 @@ async function restore(page:Page,path:Action[]){
 }
 
 async function explore(page:Page,path:Action[],id:number):Promise<void>{
-  if(halted||path.length>=report.limits.depth)return;
+  if(halted||page.isClosed()||path.length>=report.limits.depth||path.at(-1)?.kind==="editor")return;
   const candidates=await actions(page);
   for(const a of candidates){
-    if(halted||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
+    if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
     attempts++;
     failureReason="unknown";
     console.log("Exploring "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
@@ -214,6 +226,7 @@ if(!process.argv.includes("--authorized-test-demo")){
     });
     await context.routeWebSocket("**/*",ws=>{report.network.websocketsBlocked++;void ws.close();});
     const page=await context.newPage();
+    page.on("close",()=>{halted=true;});
     page.on("pageerror",err=>bump(report.startup.pageErrors,errorKind(err.message)));
     page.on("response",res=>{
       if(res.status()>=400)bump(report.network.httpErrors,String(res.status())+" "+res.request().resourceType()+" "+hostGroup(res.url()));
@@ -260,7 +273,7 @@ if(!process.argv.includes("--authorized-test-demo")){
     }catch{report.startup.ui="unavailable";}}
     console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
   }finally{
-    await persist();await context.close();
+    await persist();await context.close().catch(()=>{});
     console.log("Captured "+report.snapshots.length+" states; "+report.network.blocked+" requests blocked.");
     console.log("Blocked request categories: "+JSON.stringify(report.network.blockedKinds));
     console.log("Review and share only "+output);
