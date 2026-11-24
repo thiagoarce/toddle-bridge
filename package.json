@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "login": "tsx src/login.ts",
-    "test": "tsx --test src/draft.test.ts src/explore-policy.test.ts",
+    "test": "tsx --test src/draft.test.ts src/explore-policy.test.ts src/explore-checkpoint.test.ts",
     "map": "tsx src/map.ts",
     "map:auto": "tsx src/map.ts --auto",
     "map:watch": "tsx src/map.ts --watch",
