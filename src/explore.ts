@@ -13,7 +13,7 @@ const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
 type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"; label:string};
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>},limits:{states:40,depth:4,attempts:70}};
+const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>,allowedKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:40,depth:4,attempts:70}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -25,6 +25,32 @@ let attempts=0;
 let platformId="";
 let home="";
 let halted=false;
+function hostGroup(raw:string){
+  try{
+    const h=new URL(raw).hostname;
+    if(h==="web.toddleapp.com")return "toddle-web";
+    if(h==="toddleapp.com"||h.endsWith(".toddleapp.com"))return "toddle-service";
+    if(["fonts.googleapis.com","fonts.gstatic.com","use.typekit.net","p.typekit.net"].includes(h))return "font-provider";
+  }catch{}
+  return "external";
+}
+function bump(target:Record<string,number>,key:string){target[key]=(target[key]??0)+1;}
+function errorKind(message:string){
+  if(/timeout/i.test(message))return "timeout";
+  if(/blocked.by.client/i.test(message))return "blocked-by-client";
+  if(/network|fetch|ERR_/i.test(message))return "network";
+  if(/referenceerror|is not defined/i.test(message))return "reference-error";
+  if(/typeerror/i.test(message))return "type-error";
+  if(/syntaxerror/i.test(message))return "syntax-error";
+  return "other";
+}
+function externalFontAsset(method:string,raw:string,kind:string,nav:boolean){
+  try{
+    const u=new URL(raw);
+    return !nav&&["GET","HEAD"].includes(method)&&u.protocol==="https:"&&!u.username&&!u.password&&["stylesheet","font"].includes(kind)&&hostGroup(raw)==="font-provider";
+  }catch{return false;}
+}
+
 
 
 async function find(page:Page,a:Action):Promise<Locator|null>{
@@ -133,20 +159,23 @@ if(!process.argv.includes("--authorized-test-demo")){
       if(req.method()==="POST"){try{body=req.postDataJSON();}catch{}}
       const nav=req.isNavigationRequest();
       const scopeOK=!nav||!platformId||inPlatform(req.url(),origin,platformId);
-      if(scopeOK&&requestAllowed(req.method(),req.url(),body,origin,nav)){report.network.allowed++;await route.continue();}
-      else{
-        report.network.blocked++;
-        const kind=req.resourceType();
-        const method=["GET","HEAD","POST","OPTIONS","PUT","PATCH","DELETE"].includes(req.method())?req.method():"OTHER";
-        let group="external";
-        try{const h=new URL(req.url()).hostname;if(h==="web.toddleapp.com")group="toddle-web";else if(h==="toddleapp.com"||h.endsWith(".toddleapp.com"))group="toddle-service";}catch{}
-        const key=method+" "+kind+" "+group;
-        report.network.blockedKinds[key]=(report.network.blockedKinds[key]??0)+1;
-        await route.abort("blockedbyclient");
+      const kind=req.resourceType();
+      const method=["GET","HEAD","POST","OPTIONS","PUT","PATCH","DELETE"].includes(req.method())?req.method():"OTHER";
+      const key=method+" "+kind+" "+hostGroup(req.url());
+      if(scopeOK&&(requestAllowed(req.method(),req.url(),body,origin,nav)||externalFontAsset(req.method(),req.url(),kind,nav))){
+        report.network.allowed++;bump(report.network.allowedKinds,key);await route.continue();
+      }else{
+        report.network.blocked++;bump(report.network.blockedKinds,key);await route.abort("blockedbyclient");
       }
     });
     await context.routeWebSocket("**/*",ws=>{report.network.websocketsBlocked++;void ws.close();});
     const page=await context.newPage();
+    page.on("pageerror",err=>bump(report.startup.pageErrors,errorKind(err.message)));
+    page.on("response",res=>{
+      if(res.status()>=400)bump(report.network.httpErrors,String(res.status())+" "+res.request().resourceType()+" "+hostGroup(res.url()));
+    });
+    page.on("requestfailed",req=>bump(report.network.failedKinds,req.resourceType()+" "+hostGroup(req.url())+" "+errorKind(req.failure()?.errorText??"")));
+
     // Reuse an existing approved overview URL only in memory, otherwise open Toddle.
     const startFile=resolve(".local","explore-start.txt");
     const flag=process.argv.indexOf("--start");
@@ -163,18 +192,28 @@ if(!process.argv.includes("--authorized-test-demo")){
       platformId=new URL(initial).pathname.split("/")[2];
       home=origin+"/platform/"+platformId+"/courses";
     }
+    report.startup.stage="open-overview";
     await page.goto(initial,{waitUntil:"domcontentloaded",timeout:30000});
+    report.startup.stage="wait-platform-url";
     await page.waitForURL(u=>u.origin===origin&&/^\/platform\/[0-9]+(?:\/|$)/.test(u.pathname),{timeout:30000});
     const m=new URL(page.url()).pathname.match(/^\/platform\/([0-9]+)/);
     if(!m)throw new Error("No authenticated platform");
     platformId=m[1];home=origin+"/platform/"+platformId+"/courses";
+    report.startup.stage="restore-home";
     if(page.url()!==home)await restore(page,[]);
+    report.startup.stage="wait-cards";
     await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:20000});
+    report.startup.stage="capture-home";
     const initialState=await capture(page);
-    if(initialState)await explore(page,[],initialState.id);
-  }catch{
-    report.diagnostics.push({action:"startup",reason:"startup-blocked-or-session-expired"});
-    console.log("Startup could not load. No permissions are relaxed. Use manual login first in a test account.");
+    report.startup.stage=initialState?"explore":"capture-empty";
+    if(initialState){await explore(page,[],initialState.id);report.startup.stage="finished";}
+  }catch(err){
+    report.diagnostics.push({action:"startup:"+report.startup.stage,reason:errorKind(err instanceof Error?err.message:"")});
+    const active=context.pages().at(-1);
+    if(active){try{
+      report.startup.ui=await active.evaluate(()=>{const text=document.body?.innerText??"";if(/couldn.t load Toddle|please reload/i.test(text))return "app-load-error";if(/sign in|log in/i.test(text)&&document.querySelector("input"))return "login-visible";return "other";});
+    }catch{report.startup.ui="unavailable";}}
+    console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
   }finally{
     await persist();await context.close();
     console.log("Captured "+report.snapshots.length+" states; "+report.network.blocked+" requests blocked.");
