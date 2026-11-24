@@ -10,7 +10,7 @@ const labels = [...homeCards,...tabs,"Create activity","Create lesson plan","Hom
 const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
 const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
 const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
-type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string} | {kind:"visual";label:string;region:string;opener:boolean};
+type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string} | {kind:"visual";label:string;region:string;opener:boolean;interaction?:"hover"};
 type VisualCandidate={index:number;label:string;region:string;opener:boolean;x:number;y:number;width:number;height:number};
 const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],summary,input[type=radio],nav li,nav div,nav span,[role=menu] div,[role=menu] span,[role=dialog] div,[role=dialog] span";
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
@@ -28,7 +28,7 @@ async function visualCandidates(page:Page):Promise<VisualCandidate[]>{
 }
 const persist=()=>writeFile(output,JSON.stringify(report,null,2)+"\n",{encoding:"utf8",mode:0o600});
 const shape=(url:string)=>"/"+new URL(url).pathname.split("/").filter(Boolean).slice(0,30).map(x=>routeWords.includes(x.toLowerCase())?x.toLowerCase():":segment").join("/");
-const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.label;
+const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.kind==="visual"&&a.interaction==="hover"?"Hover "+a.label:a.label;
 const seen=new Map<string,number>();
 const stateUrls=new Map<number,string>();
 const stateDialogs=new Map<number,boolean>();
@@ -125,7 +125,14 @@ async function click(page:Page,a:Action){
   // The selected locator is an explicitly allowed navigation control.
   // Use Playwright's native actionability checks, not a custom hit-test.
   try {
-    await loc.click({timeout:10000});
+    if(a.kind==="visual"&&a.interaction==="hover")await loc.hover({timeout:5000});
+    else if(a.kind==="visual"&&/^(?:timeline|list|grid|week|day) view$/i.test(a.label)){
+      const radio=await loc.evaluate('el=>el instanceof HTMLInputElement && el.type==="radio"');
+      if(radio){
+        const label=page.locator("label").filter({has:loc});
+        if(await label.count()===1)await label.click({timeout:5000});else await loc.click({timeout:5000});
+      }else await loc.click({timeout:5000});
+    }else await loc.click({timeout:10000});
   } catch(err) {
     const msg=err instanceof Error?err.message:"";
     failureReason=/intercepts pointer events/i.test(msg)?"navigation-overlay":
@@ -159,7 +166,10 @@ async function actions(page:Page):Promise<Action[]>{
     result.push({kind:"calendar",label:"Calendar"});
   }else{
     // Discover rendered controls first. This includes text inside custom React elements.
-    for(const v of visual)result.push({kind:"visual",label:v.label,region:v.region,opener:v.opener});
+    for(const v of visual){
+      if(v.region==="navigation"&&/^(Planning|Classroom)$/i.test(v.label))result.push({kind:"visual",label:v.label,region:v.region,opener:false,interaction:"hover"});
+      result.push({kind:"visual",label:v.label,region:v.region,opener:v.opener});
+    }
     for(const label of [...new Set(tabs)]){if(label==="Calendar")continue;result.push({kind:"tab",label});result.push({kind:"navigation",label});}
     for(const label of editorOpeners)result.push({kind:"editor",label});
   }
@@ -256,7 +266,7 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
         // Only use direct restore when this URL differed from the parent and is in scope.
         const parentUrl=job.path.length?stateUrls.get(report.edges.find(e=>e.to===job.id&&e.from!==job.id)?.from??-1):undefined;
         if(currentPath===pathKey(job.path)&&page.url()===target)ready=true;
-        else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&inPlatform(target,origin,platformId)){
+        else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&!job.path.some(a=>a.kind==="visual"&&a.interaction==="hover")&&inPlatform(target,origin,platformId)){
           try{
             currentPath=null;
             await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
