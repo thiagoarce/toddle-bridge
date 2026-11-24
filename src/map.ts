@@ -24,6 +24,8 @@ await mkdir(reportDir, { recursive: true });
 const terminal = createInterface({ input: process.stdin, output: process.stdout });
 const auto = process.argv.includes("--auto");
 const watch = process.argv.includes("--watch");
+const approved = process.argv.includes(auto ? "--authorized-test-demo" : "--authorized");
+const toddleOrigin = "https://web.toddleapp.com";
 const captureSource = await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
 type CaptureResult = { scanned: number; truncated: boolean; controls: unknown[]; candidates: {name:string;href:string}[] } | null;
 function diagnostic(error: unknown) {
@@ -53,17 +55,25 @@ async function persist() {
 try {
   console.log(auto ? "Bounded automatic mapper. Use only in approved test/demo environments." : "Read-only guided mapper. Use only in an authorized environment.");
   console.log("It does not click, submit, read network traffic, export screenshots or collect field values.");
-  if ((await terminal.question("Confirmed permission to inspect this environment? Type SIM: ")).trim() !== "SIM") {
-    console.log("Cancelled.");
+  if (!approved) {
+    console.log(auto ? "For authorized test/demo environments only, run with --authorized-test-demo." : "For authorized inspection, run with --authorized.");
+    process.exitCode = 1;
   } else {
     context = await chromium.launchPersistentContext(resolve(".local","browser-profile"), {headless:false});
-    console.log("Open the approved Toddle page manually in the dedicated browser.");
-    const raw = (await terminal.question("Enter approved HTTPS origin (example: https://web.toddleapp.com): ")).trim();
-    let allowed: URL;
-    try { allowed = new URL(raw); } catch { throw new Error("Invalid origin"); }
-    if (allowed.protocol !== "https:" || allowed.username || allowed.password || allowed.pathname !== "/" || allowed.search || allowed.hash) {
-      throw new Error("Enter only the HTTPS origin, without path or credentials.");
+    const allowed = new URL(toddleOrigin);
+    const existing = context.pages().find(p => {
+      try { return new URL(p.url()).origin === allowed.origin; } catch { return false; }
+    });
+    const startPage = existing ?? context.pages().find(p => p.url() === "about:blank") ?? await context.newPage();
+    if (!existing) {
+      console.log("Opening Toddle automatically...");
+      await startPage.goto(allowed.href,{waitUntil:"domcontentloaded",timeout:30000});
     }
+    if (!/^\/platform\/[0-9]{1,18}(?:\/|$)/i.test(new URL(startPage.url()).pathname) || new URL(startPage.url()).origin !== allowed.origin) {
+      console.log("Waiting for the approved Toddle overview. Sign in manually if required.");
+      await startPage.waitForURL(u => u.origin === allowed.origin && /^\/platform\/[0-9]{1,18}(?:\/|$)/i.test(u.pathname),{timeout:180000});
+    }
+    console.log("Toddle opened. Origin fixed to "+allowed.origin);
     const pages = () => context!.pages().filter(p => {
       try { return new URL(p.url()).origin === allowed.origin; } catch { return false; }
     });
@@ -109,11 +119,7 @@ try {
     }
     if (auto) {
       console.log("Automatic mode is for approved test/demo environments with fictitious data only.");
-      console.log("Open the authorized overview page manually, then return here.");
-      if ((await terminal.question("Confirm test/demo scope and permission for automatic navigation? Type SIM: ")).trim() !== "SIM") throw new Error("Cancelled.");
-      const tabs = pages();
-      if (!tabs.length) throw new Error("Open an approved tab first.");
-      const page = tabs[tabs.length-1];
+      const page = startPage;
       const startPlatform = new URL(page.url()).pathname.match(/^\/platform\/([0-9]{1,18})(?:\/|$)/i);
       platformScope = startPlatform?.[1] ?? null;
       const initial = safeUrl(page.url());
@@ -158,10 +164,7 @@ try {
       report.skipped.limit+=queue.length;
     } else if (watch) {
       console.log("Open an approved overview or empty editor. Avoid individual student records and private conversations.");
-      if ((await terminal.question("Ready to observe a single approved tab? Type SIM: ")).trim() !== "SIM") throw new Error("Cancelled.");
-      const tabs=pages();
-      if(tabs.length!==1) throw new Error("Leave exactly one approved Toddle tab open.");
-      const page=tabs[0];
+      const page=startPage;
       console.log("Navigate manually in the browser. Captures happen automatically. Press Enter in the terminal to finish.");
       let stop=false;
       void terminal.question("").then(()=>{stop=true;},()=>{stop=true;});
