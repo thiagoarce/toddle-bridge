@@ -57,3 +57,7 @@ O relatório `.local/reports/toddle-map.json` contém categorias, formatos de ro
 ## Mapeamento automático experimental
 
 Em ambiente de teste autorizado com dados fictícios, execute `npm.cmd run map:auto`. Informe a origem HTTPS aprovada, abra manualmente a página inicial e confirme a permissão e o escopo. O programa segue até 30 URLs de navegação interna reconhecidas, sem clicar em botões, enviar formulários ou coletar tráfego. Rotas desconhecidas, consultas, registros individuais e mensagens ficam fora do crawler. O relatório `.local/reports/toddle-map-auto.json` registra estruturas, conexões e contadores de exclusão, sem URLs completas. Revise antes de compartilhar. Menus implementados apenas em JavaScript, rotas não reconhecidas e formulários de criação continuam dependendo do modo guiado. Não use em ambiente de produção com dados reais de estudantes.
+
+## Observação passiva de telas React
+
+`npm.cmd run map:watch` registra automaticamente as mudanças estruturais da aba aprovada enquanto o operador navega manualmente, sem comandos por categoria. Pressione Enter no terminal para terminar. Limite de 100 estruturas distintas; arquivo `.local/reports/toddle-map-watch.json`. Não navega ou clica sozinho. Use somente telas autorizadas de visão geral e editores vazios, sem dados individuais. O relatório mantém apenas nomes de componentes previamente permitidos, rótulos reconhecidos e rotas mascaradas. Revise antes de compartilhar.
