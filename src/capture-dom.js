@@ -42,7 +42,8 @@
             const assoc = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement ? Array.from(el.labels ?? []).map(l => label(l.textContent)).find(Boolean) : null;
             const refs = (el.getAttribute("aria-labelledby") ?? "").split(/\s+/).slice(0,5).map(id => label(document.getElementById(id)?.textContent)).find(Boolean);
             const name = label(el.getAttribute("aria-label")) ?? refs ?? assoc ?? label(el.getAttribute("placeholder")) ?? label(el.getAttribute("title")) ?? (["button","link","tab","menuitem","heading"].includes(role) ? label(el.textContent) : null) ?? null;
-            const control = { tag, role, type, name, required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true", disabled: el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true", editable: el.getAttribute("contenteditable") === "true", destination: tag === "a" ? route(el.getAttribute("href") ?? "") : null };
+            const component = ["ClassCardV2__container","ButtonCard__container","TeacherCoursesV2__container","GlobalMenuTray__iconContainer","GlobalMenuTray__messagingIconContainer"].find(prefix => Array.from(el.classList).some(c=>c===prefix || c.startsWith(prefix+"___"))) ?? null;
+            const control = { tag, role, type, name, component, required: el.hasAttribute("required") || el.getAttribute("aria-required") === "true", disabled: el.hasAttribute("disabled") || el.getAttribute("aria-disabled") === "true", editable: el.getAttribute("contenteditable") === "true", destination: tag === "a" ? route(el.getAttribute("href") ?? "") : null };
             const key = JSON.stringify(control);
             const entry = counts.get(key);
             if (entry) entry.count++;
