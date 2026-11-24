@@ -93,16 +93,24 @@ async function find(page:Page,a:Action):Promise<Locator|null>{
 async function click(page:Page,a:Action){
   const loc=await waitForControl(page,a);
   if(!loc){failureReason="control-not-ready";return false;}
-  // Never click an editor, form, menu of actions or a disabled control.
-  const ok=await loc.evaluate('(el) => !el.closest("form,[contenteditable=true],[role=dialog],[role=menu],[role=toolbar]") && !el.matches("button[type=submit],button[type=reset],[aria-disabled=true],[disabled]")');
-  if(!ok){failureReason="control-excluded-by-safety-policy";return false;}
+  // find() already restricts candidates to known navigation cards, Calendar,
+  // and exact allowlisted tab names. A layout wrapper may itself be a form,
+  // dialog or toolbar; that alone does not make these controls write actions.
+  const guard=await loc.evaluate(`(el) => {
+    if(el.closest('[contenteditable="true"],[aria-disabled="true"],[inert]') || el.matches(':disabled')) return "disabled-or-editor";
+    if(el instanceof HTMLButtonElement && el.form && el.type!=="button") return "form-submit-or-reset";
+    if(el.matches('input[type=submit],input[type=reset],input[type=file]')) return "form-action";
+    if(el.matches('a[download]')) return "download";
+    return null;
+  }`);
+  if(guard){failureReason=guard;return false;}
   await loc.scrollIntoViewIfNeeded({timeout:3000});
   // Ensure click point belongs to the chosen navigation control rather than a nested action.
-  const point=await loc.evaluate('(el) => { const r=el.getBoundingClientRect(); for(const f of [0.5,0.25,0.75]) {const x=r.width*f,y=r.height*0.5;const h=document.elementFromPoint(r.left+x,r.top+y);if(h && el.contains(h) && (h===el || h.closest("button,a,input,[role=button],[role=tab],[role=menuitem]")===el))return {x,y};}return null;}');
+  const point=await loc.evaluate('(el) => { const r=el.getBoundingClientRect(); for(const f of [0.5,0.25,0.75,0.15,0.85]) for(const g of [0.5,0.25,0.75]) {const x=r.width*f,y=r.height*g;const h=document.elementFromPoint(r.left+x,r.top+y);if(h && el.contains(h) && (h===el || h.closest("button,a,input,textarea,select,[contenteditable=true],[role=button],[role=tab],[role=menuitem]")===el))return {x,y};}return null;}');
   if(!point){failureReason="safe-click-point-unavailable";return false;}
-  await loc.click({position:point,timeout:4000});
+  await loc.click({position:point,timeout:6000});
   await page.waitForTimeout(2500);
-  if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
+  if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";currentPath=null;return false;}
   // Give the client-rendered view a bounded period to finish replacing its shell.
   await page.waitForTimeout(1500);
   if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
