@@ -47,3 +47,9 @@ O navegador abre com um perfil local separado. Para testar a persistência, nave
 5. Adicionar autenticação de acesso remoto, auditoria, fila e interface MCP.
 
 Não armazenar dados de alunos, senhas ou sessões no repositório. Não expor a API sem autenticação. Não incluir informações pessoais em chamadas a modelos de IA sem autorização e controles adequados.
+
+## Mapeamento guiado (somente leitura)
+
+Após obter autorização da instituição e do fornecedor para inspeção automatizada em ambiente aprovado, feche o navegador de login e execute `npm.cmd run map`. Abra a página manualmente no navegador dedicado; informe a origem HTTPS exata, sem caminho. Navegue manualmente e digite no terminal a categoria da tela para registrar sua estrutura. Use formulários vazios ou dados fictícios, não telas de alunos individuais ou conversas privadas. Digite `fim` para encerrar.
+
+O relatório `.local/reports/toddle-map.json` contém categorias, formatos de rotas com segmentos desconhecidos mascarados, tipos de controles, estados e nomes reconhecidos de um vocabulário fixo. Não exporta HTML, valores de campos, imagens, cookies, cabeçalhos ou tráfego. Não clica nem publica. Cada execução bem-sucedida substitui o relatório anterior. Confira o JSON antes de compartilhar apenas esse arquivo. O mapeamento não cobre automaticamente telas não visitadas, iframes, controles ocultos ou todos os componentes personalizados; não representa uma especificação de API interna. As operações futuras devem usar interfaces autorizadas.
