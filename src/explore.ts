@@ -10,14 +10,22 @@ const labels = [...homeCards,...tabs,"Create activity","Create lesson plan","Hom
 const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
 const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
 const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
-type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string};
+type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string} | {kind:"visual";label:string;region:string;opener:boolean};
+type VisualCandidate={index:number;label:string;region:string;opener:boolean;x:number;y:number;width:number;height:number};
+const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],summary,input[type=radio],nav li,nav div,nav span,[role=menu] div,[role=menu] span,[role=dialog] div,[role=dialog] span";
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
-type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
+type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:5,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"breadth-first",duplicates:0,queued:0,attempts:0}};
+const report = {version:6,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"breadth-first-rendered-text",visualCandidates:0,duplicates:0,queued:0,attempts:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
+const visualSource=await readFile(new URL("./visual-discovery.js",import.meta.url),"utf8");
+async function visualCandidates(page:Page):Promise<VisualCandidate[]>{
+  if(!inPlatform(page.url(),origin,platformId))return [];
+  const expr=visualSource+"("+JSON.stringify({selector:visualSelector,knownLabels:[...tabs,...homeCards,...editorOpeners,"Create","New","Add","Create unit","Create lesson","Add unit","Add lesson","New unit","New lesson"]})+")";
+  return await page.evaluate(expr) as VisualCandidate[];
+}
 const persist=()=>writeFile(output,JSON.stringify(report,null,2)+"\n",{encoding:"utf8",mode:0o600});
 const shape=(url:string)=>"/"+new URL(url).pathname.split("/").filter(Boolean).slice(0,30).map(x=>routeWords.includes(x.toLowerCase())?x.toLowerCase():":segment").join("/");
 const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.label;
@@ -64,6 +72,10 @@ function errorKind(message:string){
   return "other";
 }
 async function find(page:Page,a:Action):Promise<Locator|null>{
+  if(a.kind==="visual"){
+    const matches=(await visualCandidates(page)).filter(v=>v.label.toLowerCase()===a.label.toLowerCase()&&v.region===a.region);
+    return matches.length===1?page.locator(visualSelector).nth(matches[0].index):null;
+  }
   if(a.kind==="class"){
     if(new URL(page.url()).pathname!==new URL(home).pathname)return null;
     return page.locator(cardSelector).nth(a.index);
@@ -133,12 +145,19 @@ async function click(page:Page,a:Action){
 
 async function actions(page:Page):Promise<Action[]>{
   const result:Action[]=[];
+  const visual=await visualCandidates(page);
+  const inDialog=await page.locator("[role=dialog]:visible,dialog[open]:visible").count()>0;
+  if(inDialog){
+    return visual.filter(v=>v.region==="dialog").map(v=>({kind:"visual",label:v.label,region:v.region,opener:v.opener}));
+  }
   if(new URL(page.url()).pathname===new URL(home).pathname){
     const n=Math.min(await page.locator(cardSelector).count(),12);
     for(let index=0;index<n;index++)result.push({kind:"class",index});
     for(const label of homeCards)result.push({kind:"feature",label});
     result.push({kind:"calendar",label:"Calendar"});
   }else{
+    // Discover rendered controls first. This includes text inside custom React elements.
+    for(const v of visual)result.push({kind:"visual",label:v.label,region:v.region,opener:v.opener});
     for(const label of [...new Set(tabs)]){if(label==="Calendar")continue;result.push({kind:"tab",label});result.push({kind:"navigation",label});}
     for(const label of editorOpeners)result.push({kind:"editor",label});
   }
@@ -147,6 +166,9 @@ async function actions(page:Page):Promise<Action[]>{
   for(const a of result){
     const name=actionName(a);
     if(names.has(name))continue;
+    if(a.kind==="visual"){
+      names.add(name);available.push(a);continue;
+    }
     const loc=await find(page,a);
     if(loc && await loc.isVisible() && await loc.isEnabled()){
       const selected=await loc.evaluate('(el)=>el.getAttribute("aria-selected")==="true" || el.getAttribute("aria-current")==="page" || (el instanceof HTMLInputElement && el.type==="radio" && el.checked)');
@@ -162,12 +184,15 @@ async function capture(page:Page){
   const expr=source+"("+JSON.stringify({approvedOrigin:origin,labels,routeWords})+")";
   const data=await page.evaluate(expr) as Capture;
   if(!data||!inPlatform(page.url(),origin,platformId))return null;
-  const snapshot:Snapshot={route:shape(page.url()),scanned:data.scanned,truncated:data.truncated,controls:data.controls};
+  const visual=await visualCandidates(page);
+  const snapshot:Snapshot={route:shape(page.url()),scanned:data.scanned,truncated:data.truncated,controls:data.controls,visualControls:visual.map(({index,...v})=>v)};
+  report.exploration.visualCandidates+=visual.length;
   // Ignore changes in row counts and loading skeletons when deciding whether to expand a view.
   // Keep URLs only in process memory; the report contains masked routes.
   const dialog=(snapshot.controls as {control:{role:string}}[]).some(c=>c.control.role==="dialog");
   const features=(snapshot.controls as {control:{name:string|null;role:string;editable:boolean;type:string|null}}[]).filter(c=>c.control.name||c.control.editable||c.control.role==="dialog"||c.control.role==="textbox").map(c=>JSON.stringify([c.control.role,c.control.name,c.control.editable,c.control.type])).sort();
-  const key=page.url()+"|"+JSON.stringify([...new Set(features)]);
+  const visualSignature=visual.map(v=>v.region+"|"+v.label.toLowerCase()).sort();
+  const key=page.url()+"|"+JSON.stringify([...new Set(features)])+"|"+JSON.stringify(visualSignature);
   if(seen.has(key)){report.exploration.duplicates++;return {id:seen.get(key)!,fresh:false};}
   const id=report.snapshots.length;
   report.snapshots.push(snapshot);seen.set(key,id);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
@@ -192,7 +217,12 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
   const queue:Pending[]=[];
   const expanded=new Set<number>();
   async function enqueue(path:Action[],id:number){
-    if(expanded.has(id)||path.length>=report.limits.depth||path.at(-1)?.kind==="editor"||stateDialogs.get(id))return;
+    if(expanded.has(id)||path.length>=report.limits.depth||path.at(-1)?.kind==="editor")return;
+    const last=path.at(-1);
+    // Inspect creation menus, but stop at actual editable forms and the global calendar.
+    if(last?.kind==="calendar")return;
+    if(stateDialogs.get(id)&&await page.locator("[role=dialog] input:not([type=hidden]):not([type=radio]):not([type=checkbox]):visible,[role=dialog] textarea:visible,[role=dialog] [contenteditable=true]:visible").count()>0)return;
+    if(last?.kind==="visual"&&last.opener&&await page.locator("textarea:visible,[contenteditable=true]:visible").count()>0)return;
     expanded.add(id);
     const prior=new Set(path.map(actionName));
     const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
@@ -220,8 +250,8 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
             currentPath=null;
             await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
             if(job.path.length===0)await waitForHome(page);
-            else await page.waitForTimeout(1800);
-            if(page.url()===target&&await find(page,a)){currentPath=pathKey(job.path);ready=true;}
+            else await page.waitForTimeout(2200);
+            if(page.url()===target&&await waitForControl(page,a)){currentPath=pathKey(job.path);ready=true;}
           }catch{currentPath=null;}
         }
         if(!ready)ready=await restore(page,job.path);
