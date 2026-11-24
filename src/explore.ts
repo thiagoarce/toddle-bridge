@@ -2,6 +2,7 @@ import { chromium, type Page, type Locator } from "playwright";
 import { resolve } from "node:path";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { inPlatform } from "./explore-policy.ts";
+import { atomicJson, digest, isDigest, readCheckpoint } from "./explore-checkpoint.ts";
 
 const origin = "https://web.toddleapp.com";
 const homeCards = ["Assignments manager","School announcements","School policies and resources","School library"];
@@ -16,9 +17,13 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:7,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0}};
+const report = {version:8,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
+const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
+const resume=process.argv.includes("--resume");
+const allClasses=process.argv.includes("--all-classes");
+let reportStarted=false;
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
 const visualSource=await readFile(new URL("./visual-discovery.js",import.meta.url),"utf8");
 async function visualCandidates(page:Page):Promise<VisualCandidate[]>{
@@ -26,12 +31,16 @@ async function visualCandidates(page:Page):Promise<VisualCandidate[]>{
   const expr=visualSource+"("+JSON.stringify({selector:visualSelector,knownLabels:[...tabs,...homeCards,...editorOpeners,"Create","New","Add","Create unit","Create lesson","Add unit","Add lesson","New unit","New lesson"]})+")";
   return await page.evaluate(expr) as VisualCandidate[];
 }
-const persist=()=>writeFile(output,JSON.stringify(report,null,2)+"\n",{encoding:"utf8",mode:0o600});
+const persist=()=>reportStarted?atomicJson(output,report):Promise.resolve();
 const shape=(url:string)=>"/"+new URL(url).pathname.split("/").filter(Boolean).slice(0,30).map(x=>routeWords.includes(x.toLowerCase())?x.toLowerCase():":segment").join("/");
 const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.kind==="visual"&&a.interaction==="hover"?"Hover "+a.label:a.label;
 const seen=new Map<string,number>();
 const stateUrls=new Map<number,string>();
 const stateDialogs=new Map<number,boolean>();
+const stateKeys=new Map<number,string>();
+type Pending={path:Action[];id:number;actions:Action[]};
+const queue:Pending[]=[];
+const expanded=new Set<number>();
 const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
@@ -40,6 +49,56 @@ let halted=false;
 let currentPath: string|null=null;
 let failureReason="unknown";
 const pathKey=(path:Action[])=>JSON.stringify(path);
+function validAction(a:unknown):a is Action{
+  if(!a||typeof a!=="object")return false;
+  const v=a as Record<string,unknown>;
+  if(v.kind==="class")return Number.isInteger(v.index)&&Number(v.index)>=0&&Number(v.index)<12;
+  if(typeof v.label!=="string"||!/^[a-zA-Z ]{1,64}$/.test(v.label))return false;
+  if(v.kind==="visual")return ["body","navigation","dialog","menu"].includes(String(v.region))&&typeof v.opener==="boolean"&&(v.interaction===undefined||v.interaction==="hover");
+  if(v.kind==="feature")return homeCards.includes(v.label);
+  if(v.kind==="calendar")return v.label==="Calendar";
+  if(v.kind==="editor")return editorOpeners.includes(v.label);
+  return (v.kind==="tab"||v.kind==="navigation")&&tabs.includes(v.label);
+}
+async function saveCheckpoint(){
+  if(!reportStarted)return;
+  report.exploration.queued=queue.length;
+  await atomicJson(checkpointFile,{schema:1,scope:digest(home),allClasses,report,seen:[...seen],dialogs:[...stateDialogs],expanded:[...expanded],classLayouts:[...sampledClassLayouts],queue});
+  await persist();
+}
+async function loadCheckpoint(){
+  const c=await readCheckpoint(checkpointFile) as {
+    schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];
+  };
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||c.report?.version!==8)throw Error("Checkpoint incompatible with this platform, version or class mode");
+  const snapshots=c.report.snapshots;
+  if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
+  const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
+  if(!Array.isArray(c.seen)||c.seen.length!==snapshots.length||!c.seen.every(e=>Array.isArray(e)&&isDigest(e[0])&&validId(e[1]))||
+    !Array.isArray(c.dialogs)||!c.dialogs.every(e=>Array.isArray(e)&&validId(e[0])&&typeof e[1]==="boolean")||
+    !Array.isArray(c.expanded)||!c.expanded.every(validId)||!Array.isArray(c.classLayouts)||!c.classLayouts.every(v=>typeof v==="string")||
+    !Array.isArray(c.queue)||!c.queue.every(j=>j&&validId(j.id)&&Array.isArray(j.path)&&j.path.length<=report.limits.depth&&j.path.every(validAction)&&Array.isArray(j.actions)&&j.actions.every(validAction)))throw Error("Invalid checkpoint traversal");
+  if(!c.queue.length)throw Error("Checkpoint has no pending work; start a fresh exploration");
+  report.snapshots=c.report.snapshots;
+  report.edges=c.report.edges;
+  report.diagnostics=c.report.diagnostics;
+  report.exploration={...c.report.exploration,resumed:true,previousAttempts:(c.report.exploration.previousAttempts??0)+c.report.exploration.attempts,attempts:0,queued:c.queue.length};
+  // Network counters describe this execution only; map and progress are cumulative.
+  report.limits.states=snapshots.length+80;
+  for(const [key,id] of c.seen){seen.set(key,id);stateKeys.set(id,key);}
+  for(const [id,dialog] of c.dialogs)stateDialogs.set(id,dialog);
+  for(const id of c.expanded)expanded.add(id);
+  for(const layout of c.classLayouts)sampledClassLayouts.add(layout);
+  queue.push(...c.queue);
+  console.log("Resuming "+snapshots.length+" saved states and "+queue.length+" pending paths.");
+}
+async function archivePrevious(){
+  const stamp=new Date().toISOString().replace(/[:.]/g,"-");
+  for(const [file,name] of [[output,"map"],[checkpointFile,"checkpoint"]]){
+    try{await atomicJson(resolve(dir,"toddle-"+name+"-"+stamp+".json"),await readCheckpoint(file));}
+    catch(err){if((err as NodeJS.ErrnoException).code!=="ENOENT")throw err;}
+  }
+}
 async function waitForHome(page:Page){
   await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:25000});
 }
@@ -191,23 +250,30 @@ async function actions(page:Page):Promise<Action[]>{
   return available;
 }
 
-async function capture(page:Page){
+async function inspect(page:Page){
   if(!inPlatform(page.url(),origin,platformId))return null;
   const expr=source+"("+JSON.stringify({approvedOrigin:origin,labels,routeWords})+")";
   const data=await page.evaluate(expr) as Capture;
   if(!data||!inPlatform(page.url(),origin,platformId))return null;
   const visual=await visualCandidates(page);
   const snapshot:Snapshot={route:shape(page.url()),scanned:data.scanned,truncated:data.truncated,controls:data.controls,visualControls:visual.map(({index,...v})=>v)};
-  report.exploration.visualCandidates+=visual.length;
+
   // Ignore changes in row counts and loading skeletons when deciding whether to expand a view.
   // Keep URLs only in process memory; the report contains masked routes.
   const dialog=(snapshot.controls as {control:{role:string}}[]).some(c=>["dialog","menu"].includes(c.control.role));
   const features=(snapshot.controls as {control:{name:string|null;role:string;editable:boolean;type:string|null}}[]).filter(c=>c.control.name||c.control.editable||c.control.role==="dialog"||c.control.role==="textbox").map(c=>JSON.stringify([c.control.role,c.control.name,c.control.editable,c.control.type])).sort();
   const visualSignature=visual.map(v=>v.region+"|"+v.label.toLowerCase()).sort();
-  const key=page.url()+"|"+JSON.stringify([...new Set(features)])+"|"+JSON.stringify(visualSignature);
+  const key=digest(page.url()+"|"+JSON.stringify([...new Set(features)])+"|"+JSON.stringify(visualSignature));
+  return {snapshot,key,dialog,visualCount:visual.length};
+}
+async function capture(page:Page){
+  const inspected=await inspect(page);
+  if(!inspected)return null;
+  const {snapshot,key,dialog,visualCount}=inspected;
+  report.exploration.visualCandidates+=visualCount;
   if(seen.has(key)){report.exploration.duplicates++;return {id:seen.get(key)!,fresh:false};}
   const id=report.snapshots.length;
-  report.snapshots.push(snapshot);seen.set(key,id);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
+  report.snapshots.push(snapshot);seen.set(key,id);stateKeys.set(id,key);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
   await persist();
   console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests observed: "+report.network.observed);
   return {id,fresh:true};
@@ -225,9 +291,7 @@ async function restore(page:Page,path:Action[]){
 }
 
 async function explore(page:Page,path:Action[],id:number):Promise<void>{
-  type Pending={path:Action[];id:number;actions:Action[]};
-  const queue:Pending[]=[];
-  const expanded=new Set<number>();
+
   async function enqueue(path:Action[],id:number){
     if(expanded.has(id)||path.length>=report.limits.depth||path.at(-1)?.kind==="editor")return;
     const last=path.at(-1);
@@ -239,7 +303,7 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     expanded.add(id);
     const prior=new Set(path.map(actionName));
     const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
-    if(path.length===1&&last?.kind==="class"&&!process.argv.includes("--all-classes")){
+    if(path.length===1&&last?.kind==="class"&&!allClasses){
       const snapshot=report.snapshots[id];
       const signatures=(snapshot.controls as {control:{role:string;name:string|null;type:string|null;editable:boolean}}[]).map(c=>JSON.stringify([c.control.role,c.control.name,c.control.type,c.control.editable])).sort();
       const layout=JSON.stringify([snapshot.route,[...new Set(signatures)],candidates.map(actionName).sort()]);
@@ -250,12 +314,14 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     if(candidates.length){const pending={path,id,actions:candidates};if(openMenu)queue.unshift(pending);else queue.push(pending);}
     report.exploration.queued=queue.length;
   }
-  await enqueue(path,id);
+  if(!resume)await enqueue(path,id);
+  await saveCheckpoint();
   while(queue.length&&!halted&&!page.isClosed()){
     const job=queue.shift()!;
-    report.exploration.queued=queue.length;
-    for(const a of job.actions){
-      if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
+    report.exploration.queued=queue.length+1;
+    for(let ai=0;ai<job.actions.length;ai++){
+      const a=job.actions[ai];
+      if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states){queue.unshift({...job,actions:job.actions.slice(ai)});await saveCheckpoint();return;}
       attempts++;report.exploration.attempts=attempts;
       failureReason="unknown";
       console.log("Exploring depth "+(job.path.length+1)+": "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
@@ -276,19 +342,32 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
           }catch{currentPath=null;}
         }
         if(!ready)ready=await restore(page,job.path);
+        // Revalidate the restored view before executing any queued action, including after moving PCs.
+        if(ready){
+          const actual=await inspect(page);
+          if(actual?.key!==stateKeys.get(job.id)){ready=false;failureReason="restored-state-changed";}
+          else stateUrls.set(job.id,page.url());
+        }
         if(!ready||!await click(page,a)){
           currentPath=null;report.diagnostics.push({action:actionName(a),reason:failureReason});
-          console.log("Skipped: "+failureReason);await persist();continue;
+          console.log("Skipped: "+failureReason);
+          if(halted||page.isClosed()){queue.unshift({...job,actions:job.actions.slice(ai)});return;}
+          if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
+          await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();continue;
         }
         const nextPath=[...job.path,a];
         currentPath=pathKey(nextPath);
         const item=await capture(page);
-        if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});await persist();continue;}
+        if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});if(halted||page.isClosed())return;if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();continue;}
         report.edges.push({from:job.id,to:item.id,action:actionName(a)});
         if(item.fresh)await enqueue(nextPath,item.id);
-        await persist();
+        if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
+        await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();
       }catch(err){
-        currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});await persist();
+        currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});
+        if(halted||page.isClosed())return;
+        if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
+        await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();
       }
     }
   }
@@ -344,7 +423,10 @@ if(!process.argv.includes("--authorized-test-demo")){
     await waitForHome(page);
     currentPath=pathKey([]);
     report.startup.stage="capture-home";
-    const initialState=await capture(page);
+    if(resume){report.startup.stage="load-checkpoint";await loadCheckpoint();}
+    else await archivePrevious();
+    reportStarted=true;
+    const initialState=resume?{id:0,fresh:false}:await capture(page);
     report.startup.stage=initialState?"explore":"capture-empty";
     if(initialState){await explore(page,[],initialState.id);report.startup.stage=halted||page.isClosed()?"stopped":report.exploration.queued>0||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states?"limit-reached":"finished";}
   }catch(err){
@@ -354,9 +436,11 @@ if(!process.argv.includes("--authorized-test-demo")){
       report.startup.ui=await active.evaluate(()=>{const text=document.body?.innerText??"";if(/couldn.t load Toddle|please reload/i.test(text))return "app-load-error";if(/sign in|log in/i.test(text)&&document.querySelector("input"))return "login-visible";return "other";});
     }catch{report.startup.ui="unavailable";}}
     console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
+    if(report.startup.stage==="load-checkpoint")console.log("Checkpoint not resumed. Verify the same authorized test platform, class mode, and checkpoint file, or run without --resume.");
   }finally{
     await persist();await context.close().catch(()=>{});
     console.log("Captured "+report.snapshots.length+" states; "+report.network.observed+" requests observed (no interception).");
     console.log("Review and share only "+output);
+    console.log("Local checkpoint: "+checkpointFile+"; use --resume to continue saved work.");
   }
 }
