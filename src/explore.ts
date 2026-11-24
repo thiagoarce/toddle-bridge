@@ -5,7 +5,7 @@ import { inPlatform } from "./explore-policy.ts";
 
 const origin = "https://web.toddleapp.com";
 const homeCards = ["Assignments manager","School announcements","School policies and resources","School library"];
-const tabs = ["Planning","Planner","Unit planner","Unit planning","Lesson planner","Lesson planning","Lesson plans","Learning experiences","Learning engagements","Activities","Assignments","Assignments manager","Class stream","Stream","Announcements","School announcements","Calendar","Resources","Overview","Units","Lessons","Curriculum","Classroom","Class timetable","Timetable","Weekly planner","Daily planner","Yearly planner","Learning plan","Learning goals","Class resources","Course resources","My planning","All assignments","Upcoming","Past","Drafts","Published","Scheduled","List view","Calendar view","Week view","Day view"];
+const tabs = ["Planning","Planner","Unit planner","Unit planning","Lesson planner","Lesson planning","Lesson plans","Learning experiences","Learning engagements","Activities","Assignments","Assignments manager","Class stream","Stream","Announcements","School announcements","Calendar","Resources","Overview","Units","Lessons","Curriculum","Classroom","Class timetable","Timetable","Weekly planner","Daily planner","Yearly planner","Learning plan","Learning goals","Class resources","Course resources","My planning","All assignments","Upcoming","Past","Drafts","Published","Scheduled","List view","Calendar view","Week view","Day view","Unit plans","Unit planning","Lesson plans","Learning experiences","Learning engagement","Learning experience","Assessment","Assessments","Class calendar","Class announcements","Class activities","Tasks","Learning tasks","Class journal","Journal","Curriculum overview","Scope and sequence","Weekly planning","Daily planning","Teaching and learning","Learning resources","Published assignments","Scheduled assignments","Draft assignments"];
 const labels = [...homeCards,...tabs,"Create activity","Create lesson plan","Home","Courses","My courses","Create","Add","Edit","Save","Publish","Send","Students","Messaging","Create announcement","Create assignment","Add attachment","Title","Description","Instructions","Due date","Start date","End date","Date","Time","More options","Cancel","Close","Search","Filter","Draft","New","Schedule"];
 const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
 const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
@@ -14,7 +14,7 @@ type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:4,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120}};
+const report = {version:5,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"breadth-first",duplicates:0,queued:0,attempts:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -22,6 +22,8 @@ const persist=()=>writeFile(output,JSON.stringify(report,null,2)+"\n",{encoding:
 const shape=(url:string)=>"/"+new URL(url).pathname.split("/").filter(Boolean).slice(0,30).map(x=>routeWords.includes(x.toLowerCase())?x.toLowerCase():":segment").join("/");
 const actionName=(a:Action)=>a.kind==="class"?"Class card "+(a.index+1):a.label;
 const seen=new Map<string,number>();
+const stateUrls=new Map<number,string>();
+const stateDialogs=new Map<number,boolean>();
 let attempts=0;
 let platformId="";
 let home="";
@@ -137,11 +139,21 @@ async function actions(page:Page):Promise<Action[]>{
     for(const label of homeCards)result.push({kind:"feature",label});
     result.push({kind:"calendar",label:"Calendar"});
   }else{
-    for(const label of tabs){result.push({kind:"tab",label});result.push({kind:"navigation",label});}
+    for(const label of [...new Set(tabs)]){if(label==="Calendar")continue;result.push({kind:"tab",label});result.push({kind:"navigation",label});}
     for(const label of editorOpeners)result.push({kind:"editor",label});
   }
   const available:Action[]=[];
-  for(const a of result){const loc=await find(page,a);if(loc && await loc.isVisible() && await loc.isEnabled())available.push(a);}
+  const names=new Set<string>();
+  for(const a of result){
+    const name=actionName(a);
+    if(names.has(name))continue;
+    const loc=await find(page,a);
+    if(loc && await loc.isVisible() && await loc.isEnabled()){
+      const selected=await loc.evaluate('(el)=>el.getAttribute("aria-selected")==="true" || el.getAttribute("aria-current")==="page" || (el instanceof HTMLInputElement && el.type==="radio" && el.checked)');
+      if(selected)continue;
+      names.add(name);available.push(a);
+    }
+  }
   return available;
 }
 
@@ -151,10 +163,14 @@ async function capture(page:Page){
   const data=await page.evaluate(expr) as Capture;
   if(!data||!inPlatform(page.url(),origin,platformId))return null;
   const snapshot:Snapshot={route:shape(page.url()),scanned:data.scanned,truncated:data.truncated,controls:data.controls};
-  const key=page.url()+"|"+JSON.stringify(snapshot);
-  if(seen.has(key))return {id:seen.get(key)!,fresh:false};
+  // Ignore changes in row counts and loading skeletons when deciding whether to expand a view.
+  // Keep URLs only in process memory; the report contains masked routes.
+  const dialog=(snapshot.controls as {control:{role:string}}[]).some(c=>c.control.role==="dialog");
+  const features=(snapshot.controls as {control:{name:string|null;role:string;editable:boolean;type:string|null}}[]).filter(c=>c.control.name||c.control.editable||c.control.role==="dialog"||c.control.role==="textbox").map(c=>JSON.stringify([c.control.role,c.control.name,c.control.editable,c.control.type])).sort();
+  const key=page.url()+"|"+JSON.stringify([...new Set(features)]);
+  if(seen.has(key)){report.exploration.duplicates++;return {id:seen.get(key)!,fresh:false};}
   const id=report.snapshots.length;
-  report.snapshots.push(snapshot);seen.set(key,id);
+  report.snapshots.push(snapshot);seen.set(key,id);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
   await persist();
   console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests observed: "+report.network.observed);
   return {id,fresh:true};
@@ -172,24 +188,57 @@ async function restore(page:Page,path:Action[]){
 }
 
 async function explore(page:Page,path:Action[],id:number):Promise<void>{
-  if(halted||page.isClosed()||path.length>=report.limits.depth||path.at(-1)?.kind==="editor")return;
-  const candidates=await actions(page);
-  for(const a of candidates){
-    if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
-    attempts++;
-    failureReason="unknown";
-    console.log("Exploring "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
-    try {
-      if(!await restore(page,path)||!await click(page,a)){
-        currentPath=null;
-        report.diagnostics.push({action:actionName(a),reason:failureReason});console.log("Skipped: "+failureReason);await persist();continue;
+  type Pending={path:Action[];id:number;actions:Action[]};
+  const queue:Pending[]=[];
+  const expanded=new Set<number>();
+  async function enqueue(path:Action[],id:number){
+    if(expanded.has(id)||path.length>=report.limits.depth||path.at(-1)?.kind==="editor"||stateDialogs.get(id))return;
+    expanded.add(id);
+    const prior=new Set(path.map(actionName));
+    const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
+    if(candidates.length)queue.push({path,id,actions:candidates});
+    report.exploration.queued=queue.length;
+  }
+  await enqueue(path,id);
+  while(queue.length&&!halted&&!page.isClosed()){
+    const job=queue.shift()!;
+    report.exploration.queued=queue.length;
+    for(const a of job.actions){
+      if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
+      attempts++;report.exploration.attempts=attempts;
+      failureReason="unknown";
+      console.log("Exploring depth "+(job.path.length+1)+": "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
+      try{
+        let ready=false;
+        const target=stateUrls.get(job.id);
+        // Reuse observed overview URLs rather than replaying the whole path.
+        // Only use direct restore when this URL differed from the parent and is in scope.
+        const parentUrl=job.path.length?stateUrls.get(report.edges.find(e=>e.to===job.id&&e.from!==job.id)?.from??-1):undefined;
+        if(currentPath===pathKey(job.path)&&page.url()===target)ready=true;
+        else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&inPlatform(target,origin,platformId)){
+          try{
+            await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
+            if(job.path.length===0)await waitForHome(page);
+            else await page.waitForTimeout(1800);
+            if(page.url()===target&&await find(page,a)){currentPath=pathKey(job.path);ready=true;}
+          }catch{currentPath=null;}
+        }
+        if(!ready)ready=await restore(page,job.path);
+        if(!ready||!await click(page,a)){
+          currentPath=null;report.diagnostics.push({action:actionName(a),reason:failureReason});
+          console.log("Skipped: "+failureReason);await persist();continue;
+        }
+        const nextPath=[...job.path,a];
+        currentPath=pathKey(nextPath);
+        const item=await capture(page);
+        if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});await persist();continue;}
+        report.edges.push({from:job.id,to:item.id,action:actionName(a)});
+        if(item.fresh)await enqueue(nextPath,item.id);
+        await persist();
+      }catch(err){
+        currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});await persist();
       }
-      currentPath=pathKey([...path,a]);
-      const item=await capture(page);
-      if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});await persist();continue;}
-      report.edges.push({from:id,to:item.id,action:actionName(a)});await persist();
-      if(item.fresh)await explore(page,[...path,a],item.id);
-    }catch(err){currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});await persist();}
+    }
   }
 }
 
