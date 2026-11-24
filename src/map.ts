@@ -22,8 +22,9 @@ const routeWords = ["home","dashboard","class","classes","classroom","planning",
 const reportDir = resolve(".local","reports");
 await mkdir(reportDir, { recursive: true });
 const terminal = createInterface({ input: process.stdin, output: process.stdout });
-const report = { version: 1, mode: "guided-read-only", snapshots: [] as unknown[] };
-const reportPath = resolve(reportDir,"toddle-map.json");
+const auto = process.argv.includes("--auto");
+const report = { version: 2, mode: auto ? "automatic-bounded" : "guided-read-only", snapshots: [] as unknown[], edges: [] as { from: number; to: number; label: string }[], skipped: { invalid: 0, failed: 0, duplicate: 0, limit: 0 } };
+const reportPath = resolve(reportDir,auto ? "toddle-map-auto.json" : "toddle-map.json");
 let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
 
 function shape(path: string) {
@@ -35,7 +36,7 @@ async function persist() {
 }
 
 try {
-  console.log("Read-only guided mapper. Use only in an authorized environment.");
+  console.log(auto ? "Bounded automatic mapper. Use only in approved test/demo environments." : "Read-only guided mapper. Use only in an authorized environment.");
   console.log("It does not click, submit, read network traffic, export screenshots or collect field values.");
   if ((await terminal.question("Confirmed permission to inspect this environment? Type SIM: ")).trim() !== "SIM") {
     console.log("Cancelled.");
@@ -48,23 +49,28 @@ try {
     if (allowed.protocol !== "https:" || allowed.username || allowed.password || allowed.pathname !== "/" || allowed.search || allowed.hash) {
       throw new Error("Enter only the HTTPS origin, without path or credentials.");
     }
-    console.log("Navigate manually. Do not enter student or recipient details. Use empty forms or test data.");
-    console.log("Categories: " + categories.join(", "));
-    console.log("Type a category to capture the current screen; type fim to finish.");
-    while (true) {
-      const category = (await terminal.question("Capture category: ")).trim().toLowerCase();
-      if (category === "fim") break;
-      if (!categories.includes(category)) { console.log("Invalid category."); continue; }
-      const pages = context.pages().filter(p => {
-        try { return new URL(p.url()).origin === allowed.origin; } catch { return false; }
-      });
-      if (!pages.length) { console.log("No open page on approved origin."); continue; }
-      let page = pages[pages.length-1];
-      if (pages.length > 1) {
-        const selected = Number(await terminal.question("Approved tabs: " + pages.length + ". Choose number (1-" + pages.length + "): "));
-        if (!Number.isInteger(selected) || selected < 1 || selected > pages.length) continue;
-        page = pages[selected-1];
-      }
+    const pages = () => context!.pages().filter(p => {
+      try { return new URL(p.url()).origin === allowed.origin; } catch { return false; }
+    });
+    // Automatic navigation is limited to known overview routes. No queries,
+    // action routes, individual records, messages, or unknown path words.
+    const allowedSegments = new Set(["home","dashboard","class","classes","classroom","planning","planner","plans","lesson","lessons","lesson-plan","lesson-plans","unit","units","activity","activities","assignment","assignments","announcement","announcements","calendar","resources","teacher","teachers","stream","school","schools","app","learning","assessment","assessments","curriculum","overview","portal","learning-experiences","learning-engagements","class-stream","teacher-portal","classroom-stream","unit-planner","lesson-planner"]);
+    function safeUrl(raw: string): string | null {
+      try {
+        const u = new URL(raw);
+        if (u.origin !== allowed.origin || u.username || u.password || u.search) return null;
+        if (u.hash && !u.hash.startsWith("#/")) return null;
+        const segments = (u.pathname + (u.hash ? u.hash.slice(1) : "")).split("/").filter(Boolean);
+        if (segments.length > 16 || segments.some(x => !allowedSegments.has(x.toLowerCase()) && !/^(?:[0-9]{1,18}|[a-f0-9]{24}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.test(x))) return null;
+        // Don't traverse individual records: opaque IDs may appear only
+        // after explicitly class/school container segments.
+        for(let i=0;i<segments.length;i++) {
+          if (!allowedSegments.has(segments[i].toLowerCase()) && !["class","classes","classroom","school","schools"].includes((segments[i-1]??"").toLowerCase())) return null;
+        }
+        return u.href;
+      } catch { return null; }
+    }
+    async function capture(page: import("playwright").Page, category: string) {
       try {
         const url = new URL(page.url());
         const data = await page.evaluate(({approvedOrigin, labels, routeWords}) => {
@@ -116,14 +122,84 @@ try {
             if (entry) entry.count++;
             else if (counts.size < 250) counts.set(key,{control,count:1});
           }
-          return { scanned: Math.min(nodes.length,4000), truncated: nodes.length > 4000 || counts.size >= 250, controls: [...counts.values()] };
+          const navigationNames = new Set(["home","dashboard","classes","class","classroom","planning","planner","unit planner","lesson plans","learning experiences","learning engagements","activities","assignments","class stream","stream","announcements","calendar","resources","planejamento","turmas","atividades","avisos","calendário"]);
+          const candidates = Array.from(document.querySelectorAll("a[href]")).filter(el => el.getClientRects().length && !el.closest("[hidden],[aria-hidden=true],[download]")).slice(0,500).flatMap(el => {
+            const name = label(el.getAttribute("aria-label")) ?? label(el.textContent) ?? label(el.getAttribute("title"));
+            const href = el.getAttribute("href");
+            if (!name || !href || !navigationNames.has(name.toLowerCase())) return [];
+            try { return [{name,href:new URL(href,location.href).href}]; } catch { return []; }
+          });
+          return { scanned: Math.min(nodes.length,4000), truncated: nodes.length > 4000 || counts.size >= 250, controls: [...counts.values()], candidates };
         }, {approvedOrigin:allowed.origin,labels,routeWords});
-        if (!data || new URL(page.url()).origin !== allowed.origin) { console.log("Origin changed; discarded."); continue; }
-        const snapshot = { category, route: shape(url.pathname), fragmentRoute: url.hash.startsWith("#/") ? shape(url.hash.slice(1).split("?")[0]) : null, ...data };
+        if (!data || new URL(page.url()).origin !== allowed.origin || (auto && !safeUrl(page.url()))) { console.log("Origin or route changed; discarded."); return null; }
+        const {candidates, ...structure} = data;
+        const snapshot = { category, route: shape(url.pathname), fragmentRoute: url.hash.startsWith("#/") ? shape(url.hash.slice(1).split("?")[0]) : null, ...structure };
         report.snapshots.push(snapshot);
         await persist();
         console.log("Captured " + data.controls.length + " control signatures. Total: " + report.snapshots.length);
-      } catch { console.log("Capture failed or page changed; retry after navigation."); }
+        return candidates;
+      } catch { console.log("Capture failed or page changed; retry after navigation."); return null; }
+    }
+    if (auto) {
+      console.log("Automatic mode is for approved test/demo environments with fictitious data only.");
+      console.log("Open the authorized overview page manually, then return here.");
+      if ((await terminal.question("Confirm test/demo scope and permission for automatic navigation? Type SIM: ")).trim() !== "SIM") throw new Error("Cancelled.");
+      const tabs = pages();
+      if (!tabs.length) throw new Error("Open an approved tab first.");
+      const page = tabs[tabs.length-1];
+      const initial = safeUrl(page.url());
+      if (!initial) throw new Error("Starting route is outside the automatic allowlist. Use guided mode.");
+      const max = 30;
+      const queue: { url: string; label: string; from: number | null }[] = [{url:initial,label:"Start",from:null}];
+      const visited = new Map<string, number>();
+      const attempted = new Set<string>();
+      while (queue.length && attempted.size < max) {
+        const next = queue.shift()!;
+        if (attempted.has(next.url)) {
+          const id=visited.get(next.url);
+          if(id!==undefined && next.from!==null) report.edges.push({from:next.from,to:id,label:next.label});
+          report.skipped.duplicate++; continue;
+        }
+        attempted.add(next.url);
+        try {
+          if(page.url()!==next.url) await page.goto(next.url,{waitUntil:"domcontentloaded",timeout:20000});
+          await page.waitForTimeout(1500);
+          if (!safeUrl(page.url())) { report.skipped.invalid++; break; }
+          const category = next.label==="Start" ? "home" : "auto";
+          const candidates = await capture(page,category);
+          if(!candidates) { report.skipped.failed++; continue; }
+          const id=report.snapshots.length-1;
+          visited.set(next.url,id);
+          if(next.from!==null) report.edges.push({from:next.from,to:id,label:next.label});
+          for(const candidate of candidates) {
+            const url=safeUrl(candidate.href);
+            if(!url) { report.skipped.invalid++; continue; }
+            if(queue.length>=300) { report.skipped.limit++; continue; }
+            queue.push({url,label:candidate.name,from:id});
+          }
+          await persist();
+          console.log("Automatic progress: "+attempted.size+"/"+max+"; pending "+queue.length);
+        } catch { report.skipped.failed++; console.log("Page unavailable; skipped."); }
+      }
+      report.skipped.limit+=queue.length;
+    } else {
+      console.log("Navigate manually. Do not enter student or recipient details. Use empty forms or test data.");
+      console.log("Categories: " + categories.join(", "));
+      console.log("Type a category to capture the current screen; type fim to finish.");
+      while(true) {
+        const category = (await terminal.question("Capture category: ")).trim().toLowerCase();
+        if(category==="fim") break;
+        if(!categories.includes(category)) { console.log("Invalid category."); continue; }
+        const tabs=pages();
+        if(!tabs.length) { console.log("No open page on approved origin."); continue; }
+        let page=tabs[tabs.length-1];
+        if(tabs.length>1) {
+          const selected=Number(await terminal.question("Approved tabs: "+tabs.length+". Choose number: "));
+          if(!Number.isInteger(selected)||selected<1||selected>tabs.length) continue;
+          page=tabs[selected-1];
+        }
+        await capture(page,category);
+      }
     }
     await persist();
     console.log("Report saved to: " + reportPath);
