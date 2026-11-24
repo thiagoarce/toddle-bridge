@@ -1,6 +1,7 @@
 import { parse, visit, Kind } from "graphql";
 
-const writes = /^(?:create|update|delete|remove|insert|upsert|mutate|publish|unpublish|send|submit|save|archive|restore|approve|reject|assign|unassign|mark|toggle|set|add|invite|logout|login|signout|signoff|reset|upload|download|track|record|sync|acknowledge|dismiss|complete|register)(?:$|[_-]|[A-Z]|[a-z])/i;
+const verbs = "create|update|delete|remove|insert|upsert|mutate|publish|unpublish|send|submit|save|archive|restore|approve|reject|assign|unassign|mark|toggle|set|add|invite|logout|login|signout|signoff|reset|upload|download|track|record|sync|acknowledge|dismiss|complete|register";
+const writes = new RegExp("^(?:"+verbs+"|"+verbs.split("|").map(v=>v[0].toUpperCase()+v.slice(1)).join("|") + ")(?:$|[_-]|[A-Z])");
 const riskyPath = /(?:^|\/)(?:create|update|delete|remove|publish|send|submit|save|archive|logout|signout|mark-read|upload|download|students|student|messages|messaging|behaviour|behavior|grades|gradebook|reports|progress-reports)(?:\/|$)/i;
 
 export function queryOnly(source: unknown): boolean {
