@@ -9,14 +9,16 @@
   "scripts": {
     "dev": "tsx src/server.ts",
     "login": "tsx src/login.ts",
-    "test": "tsx --test src/draft.test.ts",
+    "test": "tsx --test src/draft.test.ts src/explore-policy.test.ts",
     "map": "tsx src/map.ts",
     "map:auto": "tsx src/map.ts --auto",
-    "map:watch": "tsx src/map.ts --watch"
+    "map:watch": "tsx src/map.ts --watch",
+    "map:explore": "tsx src/explore.ts"
   },
   "dependencies": {
     "fastify": "^5.0.0",
-    "playwright": "^1.51.0"
+    "playwright": "^1.51.0",
+    "graphql": "^16.11.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
