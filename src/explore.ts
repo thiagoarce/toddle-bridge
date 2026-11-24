@@ -104,11 +104,21 @@ async function click(page:Page,a:Action){
     return null;
   }`);
   if(guard){failureReason=guard;return false;}
-  await loc.scrollIntoViewIfNeeded({timeout:3000});
-  // Ensure click point belongs to the chosen navigation control rather than a nested action.
-  const point=await loc.evaluate('(el) => { const r=el.getBoundingClientRect(); for(const f of [0.5,0.25,0.75,0.15,0.85]) for(const g of [0.5,0.25,0.75]) {const x=r.width*f,y=r.height*g;const h=document.elementFromPoint(r.left+x,r.top+y);if(h && el.contains(h) && (h===el || h.closest("button,a,input,textarea,select,[contenteditable=true],[role=button],[role=tab],[role=menuitem]")===el))return {x,y};}return null;}');
-  if(!point){failureReason="safe-click-point-unavailable";return false;}
-  await loc.click({position:point,timeout:6000});
+  // The selected locator is an explicitly allowed navigation control.
+  // Use Playwright's native actionability checks, not a custom hit-test.
+  try {
+    await loc.click({trial:true,timeout:10000});
+    await loc.click({timeout:10000});
+  } catch(err) {
+    const msg=err instanceof Error?err.message:"";
+    failureReason=/intercepts pointer events/i.test(msg)?"navigation-overlay":
+      /not stable/i.test(msg)?"navigation-unstable":
+      /not visible/i.test(msg)?"navigation-hidden":
+      /not enabled/i.test(msg)?"navigation-disabled":
+      /detached/i.test(msg)?"navigation-detached":
+      /timeout/i.test(msg)?"native-click-timeout":"native-click-error";
+    return false;
+  }
   await page.waitForTimeout(2500);
   if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";currentPath=null;return false;}
   // Give the client-rendered view a bounded period to finish replacing its shell.
