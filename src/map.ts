@@ -164,13 +164,13 @@ try {
       const page=tabs[0];
       console.log("Navigate manually in the browser. Captures happen automatically. Press Enter in the terminal to finish.");
       let stop=false;
-      const finish=terminal.question("").then(()=>{stop=true;});
+      void terminal.question("").then(()=>{stop=true;},()=>{stop=true;});
+      terminal.once("close",()=>{stop=true;});
       while(!stop && !page.isClosed() && report.snapshots.length<100) {
         if(pages().includes(page)) await capture(page,"observed");
         await new Promise(resolve=>setTimeout(resolve,1500));
       }
       if(!stop) terminal.close();
-      await finish.catch(()=>{});
     } else {
       console.log("Navigate manually. Do not enter student or recipient details. Use empty forms or test data.");
       console.log("Categories: " + categories.join(", "));
