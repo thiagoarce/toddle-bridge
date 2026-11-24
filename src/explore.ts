@@ -13,7 +13,7 @@ const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
 type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"; label:string};
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0},limits:{states:40,depth:4,attempts:70}};
+const report = {version:3,mode:"guarded-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{allowed:0,blocked:0,websocketsBlocked:0,blockedKinds:{} as Record<string,number>},limits:{states:40,depth:4,attempts:70}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -134,18 +134,41 @@ if(!process.argv.includes("--authorized-test-demo")){
       const nav=req.isNavigationRequest();
       const scopeOK=!nav||!platformId||inPlatform(req.url(),origin,platformId);
       if(scopeOK&&requestAllowed(req.method(),req.url(),body,origin,nav)){report.network.allowed++;await route.continue();}
-      else{report.network.blocked++;await route.abort("blockedbyclient");}
+      else{
+        report.network.blocked++;
+        const kind=req.resourceType();
+        const method=["GET","HEAD","POST","OPTIONS","PUT","PATCH","DELETE"].includes(req.method())?req.method():"OTHER";
+        let group="external";
+        try{const h=new URL(req.url()).hostname;if(h==="web.toddleapp.com")group="toddle-web";else if(h==="toddleapp.com"||h.endsWith(".toddleapp.com"))group="toddle-service";}catch{}
+        const key=method+" "+kind+" "+group;
+        report.network.blockedKinds[key]=(report.network.blockedKinds[key]??0)+1;
+        await route.abort("blockedbyclient");
+      }
     });
     await context.routeWebSocket("**/*",ws=>{report.network.websocketsBlocked++;void ws.close();});
     const page=await context.newPage();
     // Reuse an existing approved overview URL only in memory, otherwise open Toddle.
-    const initial=context.pages().find(p=>p!==page&&new RegExp("^https://web\\.toddleapp\\.com/platform/[0-9]+/courses/?$").test(p.url()))?.url()??origin+"/";
+    const startFile=resolve(".local","explore-start.txt");
+    const flag=process.argv.indexOf("--start");
+    const explicit=flag>=0?process.argv[flag+1]:undefined;
+    const saved=await readFile(startFile,"utf8").then(v=>v.trim()).catch(()=>undefined);
+    const overview=(raw:string|undefined)=>{
+      if(!raw)return undefined;
+      try{const u=new URL(raw);return u.origin===origin&&!u.username&&!u.password&&!u.search&&!u.hash&&/^\/platform\/[0-9]+\/courses\/?$/.test(u.pathname)?u.href:undefined;}catch{return undefined;}
+    };
+    if(flag>=0&&!overview(explicit))throw new Error("Invalid start overview");
+    const initial=overview(explicit)??overview(saved)??context.pages().filter(p=>p!==page).map(p=>overview(p.url())).find(Boolean)??origin+"/";
+    if(overview(explicit))await writeFile(startFile,initial+"\n",{encoding:"utf8",mode:0o600});
+    if(overview(initial)){
+      platformId=new URL(initial).pathname.split("/")[2];
+      home=origin+"/platform/"+platformId+"/courses";
+    }
     await page.goto(initial,{waitUntil:"domcontentloaded",timeout:30000});
     await page.waitForURL(u=>u.origin===origin&&/^\/platform\/[0-9]+(?:\/|$)/.test(u.pathname),{timeout:30000});
     const m=new URL(page.url()).pathname.match(/^\/platform\/([0-9]+)/);
     if(!m)throw new Error("No authenticated platform");
     platformId=m[1];home=origin+"/platform/"+platformId+"/courses";
-    await restore(page,[]);
+    if(page.url()!==home)await restore(page,[]);
     await page.locator(cardSelector+", "+featureSelector).first().waitFor({state:"visible",timeout:20000});
     const initialState=await capture(page);
     if(initialState)await explore(page,[],initialState.id);
@@ -155,6 +178,7 @@ if(!process.argv.includes("--authorized-test-demo")){
   }finally{
     await persist();await context.close();
     console.log("Captured "+report.snapshots.length+" states; "+report.network.blocked+" requests blocked.");
+    console.log("Blocked request categories: "+JSON.stringify(report.network.blockedKinds));
     console.log("Review and share only "+output);
   }
 }
