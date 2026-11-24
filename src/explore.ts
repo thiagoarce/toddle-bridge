@@ -217,6 +217,7 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
         if(currentPath===pathKey(job.path)&&page.url()===target)ready=true;
         else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&inPlatform(target,origin,platformId)){
           try{
+            currentPath=null;
             await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
             if(job.path.length===0)await waitForHome(page);
             else await page.waitForTimeout(1800);
@@ -294,7 +295,7 @@ if(!process.argv.includes("--authorized-test-demo")){
     report.startup.stage="capture-home";
     const initialState=await capture(page);
     report.startup.stage=initialState?"explore":"capture-empty";
-    if(initialState){await explore(page,[],initialState.id);report.startup.stage="finished";}
+    if(initialState){await explore(page,[],initialState.id);report.startup.stage=halted||page.isClosed()?"stopped":report.exploration.queued>0||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states?"limit-reached":"finished";}
   }catch(err){
     report.diagnostics.push({action:"startup:"+report.startup.stage,reason:errorKind(err instanceof Error?err.message:"")});
     const active=context.pages().at(-1);
