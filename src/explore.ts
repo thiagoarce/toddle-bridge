@@ -274,7 +274,6 @@ async function capture(page:Page){
   if(seen.has(key)){report.exploration.duplicates++;return {id:seen.get(key)!,fresh:false};}
   const id=report.snapshots.length;
   report.snapshots.push(snapshot);seen.set(key,id);stateKeys.set(id,key);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
-  await persist();
   console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests observed: "+report.network.observed);
   return {id,fresh:true};
 }
@@ -307,7 +306,7 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
       const snapshot=report.snapshots[id];
       const signatures=(snapshot.controls as {control:{role:string;name:string|null;type:string|null;editable:boolean}}[]).map(c=>JSON.stringify([c.control.role,c.control.name,c.control.type,c.control.editable])).sort();
       const layout=JSON.stringify([snapshot.route,[...new Set(signatures)],candidates.map(actionName).sort()]);
-      if(sampledClassLayouts.has(layout)){report.exploration.equivalentClassLayouts++;await persist();return;}
+      if(sampledClassLayouts.has(layout)){report.exploration.equivalentClassLayouts++;return;}
       sampledClassLayouts.add(layout);
     }
     // Expand open menus first, before replaying the rest of the queue.
@@ -317,59 +316,59 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
   if(!resume)await enqueue(path,id);
   await saveCheckpoint();
   while(queue.length&&!halted&&!page.isClosed()){
-    const job=queue.shift()!;
-    report.exploration.queued=queue.length+1;
-    for(let ai=0;ai<job.actions.length;ai++){
-      const a=job.actions[ai];
-      if(halted||page.isClosed()||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states){queue.unshift({...job,actions:job.actions.slice(ai)});await saveCheckpoint();return;}
-      attempts++;report.exploration.attempts=attempts;
-      failureReason="unknown";
-      console.log("Exploring depth "+(job.path.length+1)+": "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
-      try{
-        let ready=false;
-        const target=stateUrls.get(job.id);
-        // Reuse observed overview URLs rather than replaying the whole path.
-        // Only use direct restore when this URL differed from the parent and is in scope.
-        const parentUrl=job.path.length?stateUrls.get(report.edges.find(e=>e.to===job.id&&e.from!==job.id)?.from??-1):undefined;
-        if(currentPath===pathKey(job.path)&&page.url()===target)ready=true;
-        else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&!job.path.some(a=>a.kind==="visual"&&a.interaction==="hover")&&inPlatform(target,origin,platformId)){
-          try{
-            currentPath=null;
-            await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
-            if(job.path.length===0)await waitForHome(page);
-            else await page.waitForTimeout(2200);
-            if(page.url()===target&&await waitForControl(page,a)){currentPath=pathKey(job.path);ready=true;}
-          }catch{currentPath=null;}
+    if(attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
+    const job=queue[0];
+    const a=job.actions[0];
+    if(!a){queue.shift();await saveCheckpoint();continue;}
+    attempts++;report.exploration.attempts=attempts;
+    failureReason="unknown";
+    console.log("Exploring depth "+(job.path.length+1)+": "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
+    try{
+      let ready=false;
+      const target=stateUrls.get(job.id);
+      const parentUrl=job.path.length?stateUrls.get(report.edges.find(e=>e.to===job.id&&e.from!==job.id)?.from??-1):undefined;
+      if(currentPath===pathKey(job.path)&&page.url()===target)ready=true;
+      else if(target&&target!==parentUrl&&!stateDialogs.get(job.id)&&!job.path.some(a=>a.kind==="visual"&&a.interaction==="hover")&&inPlatform(target,origin,platformId)){
+        try{
+          currentPath=null;
+          await page.goto(target,{waitUntil:"domcontentloaded",timeout:25000});
+          if(job.path.length===0)await waitForHome(page);
+          else await page.waitForTimeout(2200);
+          if(page.url()===target&&await waitForControl(page,a)){currentPath=pathKey(job.path);ready=true;}
+        }catch{currentPath=null;}
+      }
+      // A URL alone does not prove that the intended React state is active.
+      if(ready&&(await inspect(page))?.key!==stateKeys.get(job.id)){ready=false;currentPath=null;}
+      if(!ready){
+        ready=await restore(page,job.path);
+        if(ready&&(await inspect(page))?.key!==stateKeys.get(job.id)){
+          ready=false;failureReason="restored-state-changed";currentPath=null;
         }
-        if(!ready)ready=await restore(page,job.path);
-        // Revalidate the restored view before executing any queued action, including after moving PCs.
-        if(ready){
-          const actual=await inspect(page);
-          if(actual?.key!==stateKeys.get(job.id)){ready=false;failureReason="restored-state-changed";}
-          else stateUrls.set(job.id,page.url());
-        }
-        if(!ready||!await click(page,a)){
-          currentPath=null;report.diagnostics.push({action:actionName(a),reason:failureReason});
-          console.log("Skipped: "+failureReason);
-          if(halted||page.isClosed()){queue.unshift({...job,actions:job.actions.slice(ai)});return;}
-          if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
-          await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();continue;
-        }
+      }
+      if(ready)stateUrls.set(job.id,page.url());
+      if(!ready||!await click(page,a)){
+        currentPath=null;
+        report.diagnostics.push({action:actionName(a),reason:failureReason});
+        console.log("Skipped: "+failureReason);
+      }else{
         const nextPath=[...job.path,a];
         currentPath=pathKey(nextPath);
         const item=await capture(page);
-        if(!item){report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});if(halted||page.isClosed())return;if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();continue;}
-        report.edges.push({from:job.id,to:item.id,action:actionName(a)});
-        if(item.fresh)await enqueue(nextPath,item.id);
-        if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
-        await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();
-      }catch(err){
-        currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});
-        if(halted||page.isClosed())return;
-        if(ai+1<job.actions.length)queue.unshift({...job,actions:job.actions.slice(ai+1)});
-        await saveCheckpoint();if(ai+1<job.actions.length)queue.shift();
+        if(!item)report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});
+        else{
+          report.edges.push({from:job.id,to:item.id,action:actionName(a)});
+          if(item.fresh)await enqueue(nextPath,item.id);
+        }
       }
+    }catch(err){
+      currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});
     }
+    // The last durable checkpoint retains the in-flight action if the browser closes.
+    if(halted||page.isClosed())return;
+    job.actions.shift();
+    if(!job.actions.length){const index=queue.indexOf(job);if(index>=0)queue.splice(index,1);}
+    // Disk failure stops exploration rather than risking inconsistent progress.
+    await saveCheckpoint();
   }
 }
 
