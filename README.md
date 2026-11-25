@@ -91,3 +91,7 @@ Use `--fresh` para arquivar o mapa e checkpoint existentes e começar outro. `--
 ### Explorer v10 — recuperação de turmas incompletas
 
 Mantém o mapa v8/v9, inclusive com fila vazia. Reabre os cartões de turma cujo destino anterior não continha controles reconhecidos de uma turma. Após clicar em um cartão, aguarda até 25 segundos por controles pedagógicos reconhecíveis em duas leituras consecutivas; se não aparecerem, registra `class-content-not-ready` em vez de tratar a tela inicial de carregamento como concluída. A detecção de estruturas equivalentes continua ativa. Não é necessário usar `--fresh`; a migração ocorre automaticamente. A prontidão é heurística e não comprova que todos os dados terminaram de carregar.
+
+### Explorer v11 — descoberta de menus incompletos
+
+Reutiliza checkpoints v8–v10. Na migração, reabre menus Create anteriormente capturados com itens sem rótulos reconhecidos e revisita uma vez Planning/Classroom quando a interação anterior não mudou o estado. A leitura de menu considera títulos individuais, linhas renderizadas e textos curtos de descendentes, sem exportar texto integral. Menus sem opções identificáveis são registrados como `menu-items-unrecognized`; cliques/hover em Planning/Classroom que não alteram o estado são registrados como `no-visible-change`, com tentativas limitadas em sessões futuras. Não há garantia de reconhecimento de todos os itens. A interceptação de rede permanece desativada. Use a mesma conta de teste autorizada e não utilize `--fresh` para preservar o mapa.
