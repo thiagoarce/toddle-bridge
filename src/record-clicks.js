@@ -7,15 +7,17 @@
   const known=new Map(labels.map(s=>[s.toLowerCase(),s]));
   const normalize=s=>(s??"").trim().replace(/\s+/g," ");
   const named=s=>known.get(normalize(s).toLowerCase())??null;
-  const semantic="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],summary,label,input[type=radio],input[type=checkbox]";
-  const excluded="textarea,select,[contenteditable=true],input:not([type=radio]):not([type=checkbox]):not([type=button]):not([type=submit])";
+  const semantic="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],[role=option],summary,label,input,textarea,select,[contenteditable=true]";
+  const excluded="input[type=password],input[type=hidden],input[autocomplete=current-password],input[autocomplete=new-password]";
   const components=["ClassCardV2__container","ButtonCard__container","GlobalMenuTray__iconContainer"];
   const scope=()=>/^\/platform\/[0-9]+(?:\/|$)/.test(location.pathname)&&!/(?:^|\/)(?:students?|grades|gradebook|reports|progress-reports|behaviour|behavior)(?:\/|$)/i.test(location.pathname);
   const component=el=>components.find(c=>Array.from(el.classList??[]).some(x=>x===c||x.startsWith(c+"___")))??null;
   function getLabel(el){
     const refs=(el.getAttribute("aria-labelledby")??"").split(/\s+/).slice(0,5).map(id=>document.getElementById(id)?.textContent);
     const children=Array.from(el.querySelectorAll("span,strong,[role=heading]")).slice(0,12).map(n=>n.textContent);
-    return [el.getAttribute("aria-label"),el.getAttribute("title"),...refs,el.innerText,...children].map(named).find(Boolean)??null;
+    const field=el.matches("input,textarea,select,[contenteditable=true]");
+    const assoc=Array.from(el.labels??[]).slice(0,5).map(n=>n.textContent);
+    return [el.getAttribute("aria-label"),el.getAttribute("title"),el.getAttribute("placeholder"),...refs,...assoc,...(field?[]:[el.innerText,...children])].map(named).find(Boolean)??null;
   }
   document.addEventListener("click",event=>{
     if(!event.isTrusted||!scope()||event.button!==0)return;
@@ -29,9 +31,9 @@
       }
     }
     if(!el||el.closest(excluded))return;
-    const tag=["div","span","button","a","input","label","summary","li"].includes(el.localName)?el.localName:"other";
+    const tag=["div","span","button","a","input","textarea","select","label","summary","li"].includes(el.localName)?el.localName:"other";
     const declared=el.getAttribute("role");
-    const role=["button","link","tab","menuitem","radio","checkbox","option"].includes(declared)?declared:tag==="button"?"button":tag==="a"?"link":tag==="input"?"input":"unknown";
+    const role=["button","link","tab","menuitem","radio","checkbox","option"].includes(declared)?declared:tag==="button"?"button":tag==="a"?"link":tag==="input"?"input":tag==="textarea"||el.matches("[contenteditable=true]")?"textbox":tag==="select"?"combobox":"unknown";
     const rect=el.getBoundingClientRect();
     const region=el.closest("[role=menu]")?"menu":el.closest("[role=dialog],dialog")?"dialog":el.closest("nav,[role=navigation],[role=tablist]")?"navigation":"body";
     const comp=component(el);
