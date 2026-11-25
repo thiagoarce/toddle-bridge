@@ -15,7 +15,8 @@
     "map:watch": "tsx src/map.ts --watch",
     "map:explore": "tsx src/explore.ts",
     "map:record": "tsx src/record.ts",
-    "map:sheets": "tsx src/record-sheets.ts"
+    "map:sheets": "tsx src/record-sheets.ts",
+    "workflow:prepare": "node src/workflow-prepare.mjs"
   },
   "dependencies": {
     "fastify": "^5.0.0",
