@@ -17,7 +17,7 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:10,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0}};
+const report = {version:11,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
@@ -48,7 +48,7 @@ type Retry={id:number;path:Action[];action:Action;failures:number;reason:string}
 const retryLedger=new Map<string,Retry>();
 const actionKey=(id:number,a:Action)=>id+"|"+actionName(a);
 const completed=new Set<string>();
-const retryable=(reason:string)=>/^(?:class-content-not-ready|control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
+const retryable=(reason:string)=>/^(?:no-visible-change|class-content-not-ready|control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
 const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
@@ -84,7 +84,7 @@ async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
     schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -104,7 +104,7 @@ async function loadCheckpoint(){
   for(const id of c.expanded)expanded.add(id);
   for(const layout of c.classLayouts)sampledClassLayouts.add(layout);
   queue.push(...c.queue);
-  for(const e of report.edges)completed.add(e.from+"|"+e.action);
+  for(const e of report.edges){if(e.from===e.to&&/^(?:Hover )?(?:Planning|Classroom)$/.test(e.action)&&c.report.version>=11)continue;completed.add(e.from+"|"+e.action);}
   for(const entry of c.retries??[])retryLedger.set(actionKey(entry.id,entry.action),entry);
   // Older versions could mark a loading shell as a completed class visit.
   const classEdges=report.edges.filter(e=>/^Class card [1-9][0-9]*$/.test(e.action));
@@ -121,6 +121,35 @@ async function loadCheckpoint(){
     report.exploration.incompleteClassRepairs=(report.exploration.incompleteClassRepairs??0)+1;
   }
   queue.unshift(...repairJobs);
+  // Revisit previously captured but unrecognized creation menus once on upgrade.
+  if(c.report.version<11){
+    for(const e of report.edges){
+      if(e.action!=="Create")continue;
+      const dest=snapshots[e.to];
+      const unknownMenu=(dest?.controls as {control:{role:string};count:number}[]|undefined)?.some(v=>v.control.role==="menuitem"&&v.count>0)&&!(dest.visualControls??[]).some(v=>v.region==="menu");
+      if(!unknownMenu)continue;
+      const parent=classEdges.find(v=>v.to===e.from);
+      if(!parent||!/^Class card [1-9][0-9]*$/.test(parent.action))continue;
+      const path:Action[]=[{kind:"class",index:Number(parent.action.split(" ").at(-1))-1}];
+      const action:Action={kind:"visual",label:"Create",region:"body",opener:true};
+      if(!path.every(validAction))continue;
+      const key=actionKey(e.from,action);
+      completed.delete(key);expanded.delete(e.to);
+      if(!queue.some(j=>j.id===e.from&&j.actions.some(a=>actionKey(j.id,a)===key))){queue.unshift({id:e.from,path,actions:[action]});report.exploration.menuRepairs++;}
+    }
+    // A click/hover on a selected tab need not change the screen; keep its history,
+    // but retry these navigation controls once after the discovery upgrade.
+    for(const e of report.edges){
+      if(e.from!==e.to||! /^(?:Hover )?(?:Planning|Classroom)$/.test(e.action))continue;
+      const parent=classEdges.find(v=>v.to===e.from);
+      if(!parent)continue;
+      const path:Action[]=[{kind:"class",index:Number(parent.action.split(" ").at(-1))-1}];
+      const action:Action={kind:"visual",label:e.action.replace(/^Hover /,""),region:"navigation",opener:false,...(e.action.startsWith("Hover ")?{interaction:"hover" as const}:{})};
+      if(!path.every(validAction))continue;
+      const key=actionKey(e.from,action);completed.delete(key);
+      if(!queue.some(j=>j.id===e.from&&j.actions.some(a=>actionKey(j.id,a)===key)))queue.push({id:e.from,path,actions:[action]});
+    }
+  }
   // Retry transient failures at most twice, in later sessions, not repeatedly in this session.
   const scheduled=new Set(queue.flatMap(j=>j.actions.map(a=>actionKey(j.id,a))));
   for(const [key,v] of retryLedger){
@@ -356,6 +385,12 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     if(!openMenu&&last?.kind==="visual"&&last.opener&&await page.locator("textarea:visible,[contenteditable=true]:visible").count()>0)return;
     const prior=new Set(path.map(actionName));
     const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
+    if(openMenu&&!candidates.length){
+      report.exploration.unresolvedMenus++;
+      report.diagnostics.push({action:last?actionName(last):"menu",reason:"menu-items-unrecognized"});
+      console.log("Menu opened, but no recognized navigation items. Review the menu manually if needed.");
+      return;
+    }
     expanded.add(id);
     if(path.length===1&&last?.kind==="class"&&!allClasses){
       const snapshot=report.snapshots[id];
@@ -429,7 +464,11 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
         else{
           if(item.fresh||!expanded.has(item.id))await enqueue(nextPath,item.id);
           report.edges.push({from:job.id,to:item.id,action:actionName(a)});
-          completed.add(key);outcome="success";
+          if(item.id===job.id&&/^(?:Hover )?(?:Planning|Classroom)$/.test(actionName(a))){
+            report.exploration.noChangeActions++;
+            outcome="no-visible-change";
+            console.log("No visible navigation change: "+actionName(a));
+          }else{completed.add(key);outcome="success";}
         }
       }
     }catch(err){
