@@ -180,10 +180,11 @@ try{
             const index=lastFinishedClick.get(p);
             const c=index===undefined?undefined:report.clicks[index];
             const related=c?.to===id&&c.session===report.sessions&&!pending.has(p)?index!:null;
+            if(index!==undefined&&c?.to!==id)lastFinishedClick.delete(p);
             if(related!==null){
               await photograph(p,id,related,"after-click");
               // An after-click image also documents the stable state.
-              if(photographed.has(pageId(p)+"|"+id+"|"+related))photographed.add(pageId(p)+"|"+id+"|state");
+              if(photographed.has(pageId(p)+"|"+id+"|"+related)){photographed.add(pageId(p)+"|"+id+"|state");lastFinishedClick.delete(p);}
             }else if(!pending.has(p))await photograph(p,id,null,"stable-state");
           }
         }
