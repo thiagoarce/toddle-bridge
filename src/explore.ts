@@ -17,7 +17,7 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:9,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0}};
+const report = {version:10,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
@@ -48,7 +48,7 @@ type Retry={id:number;path:Action[];action:Action;failures:number;reason:string}
 const retryLedger=new Map<string,Retry>();
 const actionKey=(id:number,a:Action)=>id+"|"+actionName(a);
 const completed=new Set<string>();
-const retryable=(reason:string)=>/^(?:control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
+const retryable=(reason:string)=>/^(?:class-content-not-ready|control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
 const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
@@ -74,11 +74,17 @@ async function saveCheckpoint(){
   await atomicJson(checkpointFile,{schema:1,scope:digest(home),allClasses,report,seen:[...seen],dialogs:[...stateDialogs],expanded:[...expanded],classLayouts:[...sampledClassLayouts],queue,retries:[...retryLedger.values()]});
   await persist();
 }
+function hasClassContent(snapshot:Snapshot|undefined):boolean{
+  if(!snapshot)return false;
+  const relevant=/^(?:planning|planner|classroom|curriculum|create|unit(?:s| planner| planning| plans)?|lessons?|learning (?:experiences|engagements|goals)|activities|assignments|class stream|stream|class journal|journal|assessments?|resources|timeline view)$/i;
+  return (snapshot.visualControls??[]).some(v=>relevant.test(v.label))||
+    (snapshot.controls as {control:{name:string|null}}[]).some(c=>typeof c.control.name==="string"&&relevant.test(c.control.name));
+}
 async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
     schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -100,6 +106,21 @@ async function loadCheckpoint(){
   queue.push(...c.queue);
   for(const e of report.edges)completed.add(e.from+"|"+e.action);
   for(const entry of c.retries??[])retryLedger.set(actionKey(entry.id,entry.action),entry);
+  // Older versions could mark a loading shell as a completed class visit.
+  const classEdges=report.edges.filter(e=>/^Class card [1-9][0-9]*$/.test(e.action));
+  const repairJobs:Pending[]=[];
+  for(const e of classEdges){
+    const key=e.from+"|"+e.action;
+    if(classEdges.some(other=>other.from===e.from&&other.action===e.action&&hasClassContent(snapshots[other.to])))continue;
+    const action:Action={kind:"class",index:Number(e.action.split(" ").at(-1))-1};
+    if(!validAction(action)||snapshots[e.from]?.route!=="/platform/:segment/courses")continue;
+    completed.delete(key);
+    if((retryLedger.get(key)?.failures??0)>=3)continue;
+    if(queue.some(j=>j.id===e.from&&j.actions.some(a=>actionKey(j.id,a)===key))||repairJobs.some(j=>j.id===e.from&&j.actions.some(a=>actionKey(j.id,a)===key)))continue;
+    repairJobs.push({id:e.from,path:[],actions:[action]});
+    report.exploration.incompleteClassRepairs=(report.exploration.incompleteClassRepairs??0)+1;
+  }
+  queue.unshift(...repairJobs);
   // Retry transient failures at most twice, in later sessions, not repeatedly in this session.
   const scheduled=new Set(queue.flatMap(j=>j.actions.map(a=>actionKey(j.id,a))));
   for(const [key,v] of retryLedger){
@@ -220,7 +241,23 @@ async function click(page:Page,a:Action){
       /timeout/i.test(msg)?"native-click-timeout":"native-click-error";
     return false;
   }
-  await page.waitForTimeout(1400);
+  if(a.kind==="class"){
+    // A route change is not enough: wait for the actual course interface.
+    const deadline=Date.now()+25000;
+    let loaded=false;
+    while(Date.now()<deadline&&!page.isClosed()&&!halted){
+      if(inPlatform(page.url(),origin,platformId)&&new URL(page.url()).pathname!==new URL(home).pathname){
+        const state=await inspect(page).catch(()=>null);
+        if(state&&hasClassContent(state.snapshot)){
+          await page.waitForTimeout(700);
+          const confirmed=await inspect(page).catch(()=>null);
+          if(confirmed&&hasClassContent(confirmed.snapshot)){loaded=true;break;}
+        }
+      }
+      await page.waitForTimeout(600);
+    }
+    if(!loaded){failureReason="class-content-not-ready";currentPath=null;return false;}
+  }else await page.waitForTimeout(1400);
   if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";currentPath=null;return false;}
   // Give the client-rendered view a bounded period to finish replacing its shell.
   await page.waitForTimeout(900);
