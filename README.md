@@ -99,3 +99,7 @@ Reutiliza checkpoints v8–v10. Na migração, reabre menus Create anteriormente
 ### Explorer v12 — limites configuráveis
 
 O comando normal usa até 250 novos estados por sessão, 400 tentativas e profundidade 10. O mapa acumulado permanece no checkpoint, compatível com v8–v11. Em ambiente de teste autorizado, é possível ajustar os limites com `--max-new-states 500 --max-attempts 800 --max-depth 12`. Valores aceitos: 1–1000 novos estados, 1–1500 tentativas e profundidade 1–20. Ao retomar, não escolha uma profundidade inferior à dos caminhos pendentes já salvos. A fila vazia encerra a execução mesmo se o orçamento não foi utilizado; isso não significa cobertura integral da plataforma. As regras de reconhecimento de controles e de deduplicação não foram alteradas.
+
+### Explorer v13 — navegação observada
+
+Reconhece `Interdisciplinary unit`, `Subject specific unit`, `Import from MB Library` e `Weekly planners`. Para Weekly planners, abre o submenu Planning por hover (com alternativa por clique), procura o texto exato ou o rótulo com atalho W e segue apenas se a opção for encontrada de forma inequívoca. Reaproveita checkpoints v8–v12 e tenta recuperar menus Create anteriormente incompletos. Não presume que opções acinzentadas estejam habilitadas. Use apenas ambiente de teste autorizado. Sem interceptação de rede; o reconhecimento ainda não é OCR nem visão computacional geral.
