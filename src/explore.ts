@@ -226,8 +226,12 @@ function errorKind(message:string){
 }
 async function find(page:Page,a:Action):Promise<Locator|null>{
   if(a.kind==="submenu"){
+    const byRole=page.getByRole("menuitem",{name:/^Weekly planners(?:\s+W)?$/i}).filter({visible:true});
+    if(await byRole.count()===1)return byRole;
     const exact=page.getByText(a.label,{exact:true}).filter({visible:true});
-    return await exact.count()===1?exact:null;
+    if(await exact.count()===1)return exact;
+    const withShortcut=page.getByText(/^Weekly planners\s+W$/i).filter({visible:true});
+    return await withShortcut.count()===1?withShortcut:null;
   }
   if(a.kind==="visual"){
     const matches=(await visualCandidates(page)).filter(v=>v.label.toLowerCase()===a.label.toLowerCase()&&v.region===a.region);
@@ -276,8 +280,8 @@ async function click(page:Page,a:Action){
     try{
       await trigger.hover({timeout:5000});
       // Some collapsed sidebars need a click after hover to reveal the submenu.
-      const option=page.getByText(a.label,{exact:true}).filter({visible:true});
-      if(!await option.first().waitFor({state:"visible",timeout:1800}).then(()=>true).catch(()=>false)){
+      await page.waitForTimeout(900);
+      if(!await find(page,a)){
         await trigger.click({timeout:5000});
       }
     }catch{failureReason="control-not-ready";return false;}
