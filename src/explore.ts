@@ -17,11 +17,14 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:8,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0}};
+const report = {version:9,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
-const resume=process.argv.includes("--resume");
+const fresh=process.argv.includes("--fresh");
+const requireResume=process.argv.includes("--resume");
+let resumed=false;
+if(fresh&&requireResume)throw Error("Use either --fresh or --resume, not both");
 const allClasses=process.argv.includes("--all-classes");
 let reportStarted=false;
 const source=await readFile(new URL("./capture-dom.js",import.meta.url),"utf8");
@@ -41,6 +44,11 @@ const stateKeys=new Map<number,string>();
 type Pending={path:Action[];id:number;actions:Action[]};
 const queue:Pending[]=[];
 const expanded=new Set<number>();
+type Retry={id:number;path:Action[];action:Action;failures:number;reason:string};
+const retryLedger=new Map<string,Retry>();
+const actionKey=(id:number,a:Action)=>id+"|"+actionName(a);
+const completed=new Set<string>();
+const retryable=(reason:string)=>/^(?:control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
 const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
@@ -63,14 +71,14 @@ function validAction(a:unknown):a is Action{
 async function saveCheckpoint(){
   if(!reportStarted)return;
   report.exploration.queued=queue.length;
-  await atomicJson(checkpointFile,{schema:1,scope:digest(home),allClasses,report,seen:[...seen],dialogs:[...stateDialogs],expanded:[...expanded],classLayouts:[...sampledClassLayouts],queue});
+  await atomicJson(checkpointFile,{schema:1,scope:digest(home),allClasses,report,seen:[...seen],dialogs:[...stateDialogs],expanded:[...expanded],classLayouts:[...sampledClassLayouts],queue,retries:[...retryLedger.values()]});
   await persist();
 }
 async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
-    schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];
+    schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||c.report?.version!==8)throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -78,11 +86,11 @@ async function loadCheckpoint(){
     !Array.isArray(c.dialogs)||!c.dialogs.every(e=>Array.isArray(e)&&validId(e[0])&&typeof e[1]==="boolean")||
     !Array.isArray(c.expanded)||!c.expanded.every(validId)||!Array.isArray(c.classLayouts)||!c.classLayouts.every(v=>typeof v==="string")||
     !Array.isArray(c.queue)||!c.queue.every(j=>j&&validId(j.id)&&Array.isArray(j.path)&&j.path.length<=report.limits.depth&&j.path.every(validAction)&&Array.isArray(j.actions)&&j.actions.every(validAction)))throw Error("Invalid checkpoint traversal");
-  if(!c.queue.length)throw Error("Checkpoint has no pending work; start a fresh exploration");
+  if(c.retries!==undefined&&(!Array.isArray(c.retries)||!c.retries.every(v=>v&&validId(v.id)&&Array.isArray(v.path)&&v.path.length<=report.limits.depth&&v.path.every(validAction)&&validAction(v.action)&&Number.isInteger(v.failures)&&v.failures>=1&&v.failures<=3&&typeof v.reason==="string")))throw Error("Invalid checkpoint retries");
   report.snapshots=c.report.snapshots;
   report.edges=c.report.edges;
   report.diagnostics=c.report.diagnostics;
-  report.exploration={...c.report.exploration,resumed:true,previousAttempts:(c.report.exploration.previousAttempts??0)+c.report.exploration.attempts,attempts:0,queued:c.queue.length};
+  report.exploration={...report.exploration,...c.report.exploration,resumed:true,previousAttempts:(c.report.exploration.previousAttempts??0)+c.report.exploration.attempts,attempts:0,queued:c.queue.length,retriesQueued:0,retriesExhausted:0};
   // Network counters describe this execution only; map and progress are cumulative.
   report.limits.states=snapshots.length+80;
   for(const [key,id] of c.seen){seen.set(key,id);stateKeys.set(id,key);}
@@ -90,7 +98,17 @@ async function loadCheckpoint(){
   for(const id of c.expanded)expanded.add(id);
   for(const layout of c.classLayouts)sampledClassLayouts.add(layout);
   queue.push(...c.queue);
-  console.log("Resuming "+snapshots.length+" saved states and "+queue.length+" pending paths.");
+  for(const e of report.edges)completed.add(e.from+"|"+e.action);
+  for(const entry of c.retries??[])retryLedger.set(actionKey(entry.id,entry.action),entry);
+  // Retry transient failures at most twice, in later sessions, not repeatedly in this session.
+  const scheduled=new Set(queue.flatMap(j=>j.actions.map(a=>actionKey(j.id,a))));
+  for(const [key,v] of retryLedger){
+    if(completed.has(key)){retryLedger.delete(key);continue;}
+    if(v.failures>=3||!retryable(v.reason)){report.exploration.retriesExhausted++;continue;}
+    if(!scheduled.has(key)){queue.push({id:v.id,path:v.path,actions:[v.action]});scheduled.add(key);report.exploration.retriesQueued++;}
+  }
+  resumed=true;
+  console.log("Memory loaded: "+snapshots.length+" saved states, "+queue.length+" pending paths, "+completed.size+" known actions.");
 }
 async function archivePrevious(){
   const stamp=new Date().toISOString().replace(/[:.]/g,"-");
@@ -313,14 +331,29 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     if(candidates.length){const pending={path,id,actions:candidates};if(openMenu)queue.unshift(pending);else queue.push(pending);}
     report.exploration.queued=queue.length;
   }
-  if(!resume)await enqueue(path,id);
+  if(!resumed)await enqueue(path,id);
+  else {
+    // Always check the current home once for newly available controls.
+    const root=await capture(page);
+    if(root){
+      if(root.fresh||!expanded.has(root.id))await enqueue([],root.id);
+      else{
+        const pending=new Set(queue.filter(j=>j.id===root.id).flatMap(j=>j.actions.map(a=>actionKey(root.id,a))));
+        const unseen=(await actions(page)).filter(a=>{const key=actionKey(root.id,a);return !completed.has(key)&&!pending.has(key)&&!retryLedger.has(key);});
+        if(unseen.length)queue.push({id:root.id,path:[],actions:unseen});
+      }
+    }
+  }
   await saveCheckpoint();
   while(queue.length&&!halted&&!page.isClosed()){
     if(attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states)return;
     const job=queue[0];
     const a=job.actions[0];
     if(!a){queue.shift();await saveCheckpoint();continue;}
+    const key=actionKey(job.id,a);
+    if(completed.has(key)){report.exploration.knownActionsSkipped++;job.actions.shift();if(!job.actions.length)queue.shift();await saveCheckpoint();continue;}
     attempts++;report.exploration.attempts=attempts;
+    let outcome="unknown";
     failureReason="unknown";
     console.log("Exploring depth "+(job.path.length+1)+": "+actionName(a)+" ("+attempts+"/"+report.limits.attempts+")");
     try{
@@ -349,22 +382,26 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
       if(!ready||!await click(page,a)){
         currentPath=null;
         report.diagnostics.push({action:actionName(a),reason:failureReason});
+        outcome=failureReason;
         console.log("Skipped: "+failureReason);
       }else{
         const nextPath=[...job.path,a];
         currentPath=pathKey(nextPath);
         const item=await capture(page);
-        if(!item)report.diagnostics.push({action:actionName(a),reason:"capture-unavailable"});
+        if(!item){outcome="capture-unavailable";report.diagnostics.push({action:actionName(a),reason:outcome});}
         else{
           report.edges.push({from:job.id,to:item.id,action:actionName(a)});
+          completed.add(key);outcome="success";
           if(item.fresh)await enqueue(nextPath,item.id);
         }
       }
     }catch(err){
-      currentPath=null;report.diagnostics.push({action:actionName(a),reason:"navigation-or-capture-"+errorKind(err instanceof Error?err.message:"")});
+      currentPath=null;outcome="navigation-or-capture-"+errorKind(err instanceof Error?err.message:"");report.diagnostics.push({action:actionName(a),reason:outcome});
     }
     // The last durable checkpoint retains the in-flight action if the browser closes.
     if(halted||page.isClosed())return;
+    if(outcome==="success")retryLedger.delete(key);
+    else retryLedger.set(key,{id:job.id,path:job.path,action:a,failures:Math.min(3,(retryLedger.get(key)?.failures??0)+1),reason:outcome});
     job.actions.shift();
     if(!job.actions.length){const index=queue.indexOf(job);if(index>=0)queue.splice(index,1);}
     // Disk failure stops exploration rather than risking inconsistent progress.
@@ -422,10 +459,14 @@ if(!process.argv.includes("--authorized-test-demo")){
     await waitForHome(page);
     currentPath=pathKey([]);
     report.startup.stage="capture-home";
-    if(resume){report.startup.stage="load-checkpoint";await loadCheckpoint();}
-    else await archivePrevious();
+    if(!fresh){
+      report.startup.stage="load-checkpoint";
+      try{await loadCheckpoint();}
+      catch(err){if(requireResume||(err as NodeJS.ErrnoException).code!=="ENOENT")throw err;}
+    }
+    if(!resumed)await archivePrevious();
     reportStarted=true;
-    const initialState=resume?{id:0,fresh:false}:await capture(page);
+    const initialState=resumed?{id:0,fresh:false}:await capture(page);
     report.startup.stage=initialState?"explore":"capture-empty";
     if(initialState){await explore(page,[],initialState.id);report.startup.stage=halted||page.isClosed()?"stopped":report.exploration.queued>0||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states?"limit-reached":"finished";}
   }catch(err){
@@ -435,11 +476,11 @@ if(!process.argv.includes("--authorized-test-demo")){
       report.startup.ui=await active.evaluate(()=>{const text=document.body?.innerText??"";if(/couldn.t load Toddle|please reload/i.test(text))return "app-load-error";if(/sign in|log in/i.test(text)&&document.querySelector("input"))return "login-visible";return "other";});
     }catch{report.startup.ui="unavailable";}}
     console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
-    if(report.startup.stage==="load-checkpoint")console.log("Checkpoint not resumed. Verify the same authorized test platform, class mode, and checkpoint file, or run without --resume.");
+    if(report.startup.stage==="load-checkpoint")console.log("Checkpoint not resumed. Verify the same authorized test platform, class mode, and checkpoint file, or use --fresh to archive and start a new map.");
   }finally{
     await persist();await context.close().catch(()=>{});
     console.log("Captured "+report.snapshots.length+" states; "+report.network.observed+" requests observed (no interception).");
     console.log("Review and share only "+output);
-    console.log("Local checkpoint: "+checkpointFile+"; use --resume to continue saved work.");
+    console.log("Local checkpoint: "+checkpointFile+"; memory is reused automatically; use --fresh for a new map.");
   }
 }
