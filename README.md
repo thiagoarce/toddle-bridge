@@ -95,3 +95,7 @@ Mantém o mapa v8/v9, inclusive com fila vazia. Reabre os cartões de turma cujo
 ### Explorer v11 — descoberta de menus incompletos
 
 Reutiliza checkpoints v8–v10. Na migração, reabre menus Create anteriormente capturados com itens sem rótulos reconhecidos e revisita uma vez Planning/Classroom quando a interação anterior não mudou o estado. A leitura de menu considera títulos individuais, linhas renderizadas e textos curtos de descendentes, sem exportar texto integral. Menus sem opções identificáveis são registrados como `menu-items-unrecognized`; cliques/hover em Planning/Classroom que não alteram o estado são registrados como `no-visible-change`, com tentativas limitadas em sessões futuras. Não há garantia de reconhecimento de todos os itens. A interceptação de rede permanece desativada. Use a mesma conta de teste autorizada e não utilize `--fresh` para preservar o mapa.
+
+### Explorer v12 — limites configuráveis
+
+O comando normal usa até 250 novos estados por sessão, 400 tentativas e profundidade 10. O mapa acumulado permanece no checkpoint, compatível com v8–v11. Em ambiente de teste autorizado, é possível ajustar os limites com `--max-new-states 500 --max-attempts 800 --max-depth 12`. Valores aceitos: 1–1000 novos estados, 1–1500 tentativas e profundidade 1–20. Ao retomar, não escolha uma profundidade inferior à dos caminhos pendentes já salvos. A fila vazia encerra a execução mesmo se o orçamento não foi utilizado; isso não significa cobertura integral da plataforma. As regras de reconhecimento de controles e de deduplicação não foram alteradas.
