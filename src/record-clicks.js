@@ -10,7 +10,7 @@
   const semantic="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],summary,label,input[type=radio],input[type=checkbox]";
   const excluded="textarea,select,[contenteditable=true],input:not([type=radio]):not([type=checkbox]):not([type=button]):not([type=submit])";
   const components=["ClassCardV2__container","ButtonCard__container","GlobalMenuTray__iconContainer"];
-  const scope=()=>/^\/platform\/[0-9]+(?:\/|$)/.test(location.pathname)&&!/(?:^|\/)(?:students?|messages|messaging|grades|gradebook|reports|progress-reports|behaviour|behavior)(?:\/|$)/i.test(location.pathname);
+  const scope=()=>/^\/platform\/[0-9]+(?:\/|$)/.test(location.pathname)&&!/(?:^|\/)(?:students?|grades|gradebook|reports|progress-reports|behaviour|behavior)(?:\/|$)/i.test(location.pathname);
   const component=el=>components.find(c=>Array.from(el.classList??[]).some(x=>x===c||x.startsWith(c+"___")))??null;
   function getLabel(el){
     const refs=(el.getAttribute("aria-labelledby")??"").split(/\s+/).slice(0,5).map(id=>document.getElementById(id)?.textContent);
@@ -34,7 +34,9 @@
     const role=["button","link","tab","menuitem","radio","checkbox","option"].includes(declared)?declared:tag==="button"?"button":tag==="a"?"link":tag==="input"?"input":"unknown";
     const rect=el.getBoundingClientRect();
     const region=el.closest("[role=menu]")?"menu":el.closest("[role=dialog],dialog")?"dialog":el.closest("nav,[role=navigation],[role=tablist]")?"navigation":"body";
-    const action={label:getLabel(el),tag,role,component:component(el),region,box:[rect.x,rect.y,rect.width,rect.height].map(Math.round)};
+    const comp=component(el);
+    const peers=comp?Array.from(document.querySelectorAll("[class]")).filter(n=>component(n)===comp):[];
+    const action={label:getLabel(el),tag,role,component:comp,ordinal:comp?peers.indexOf(el):null,region,box:[rect.x,rect.y,rect.width,rect.height].map(Math.round)};
     try{
       const state=capture({approvedOrigin:location.origin,labels,routeWords});
       if(!state)return;
