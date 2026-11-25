@@ -1,6 +1,6 @@
 import { chromium, type Page } from "playwright";
 import { resolve } from "node:path";
-import { readFile, mkdir } from "node:fs/promises";
+import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { atomicJson, digest, readCheckpoint } from "./explore-checkpoint.ts";
 const origin="https://web.toddleapp.com";
@@ -9,6 +9,11 @@ const arg=process.argv.indexOf("--workflow");
 const workflow=arg<0?"free":process.argv[arg+1];
 if(!workflows.includes(workflow))throw Error("Workflow: "+workflows.join(", "));
 if(!process.argv.includes("--authorized-test-demo"))throw Error("Use --authorized-test-demo only in an authorized test environment with fictitious data.");
+const screenshots=process.argv.includes("--screenshots");
+const variantIndex=process.argv.indexOf("--variant");
+const variant=variantIndex<0?"general":process.argv[variantIndex+1]??"";
+if(!/^[a-z0-9][a-z0-9-]{0,39}$/.test(variant))throw Error("Use a generic variant slug (lowercase letters, numbers, hyphens; no personal names).");
+const maxScreenshots=180;
 const labels=["Home","Courses","My courses","Planning","Classroom","Unit planning","Unit planner","Weekly planners","Weekly planner","Daily planner","Lesson planning","Lesson plans","Learning experiences","Learning engagements","Learning experience","Learning engagement","Activities","Activity","Assignments","Assignment","Assignments manager","Assessment","Assessments","Class stream","Stream","Announcements","Class announcements","School announcements","School library","School policies and resources","Resources","Calendar","Class calendar","Continuum","Create","New","Add","Interdisciplinary unit","Subject specific unit","Import from MB Library","Unit","Unit plan","Lesson plan","Create unit","Create assignment","Create announcement","Create activity","Create lesson plan","Add lesson","Add unit","Add learning experience","Add learning engagement","Add attachment","Attach file","Upload","Title","Description","Instructions","Subject","Date","Due date","Start date","End date","Time","Save","Save draft","Publish","Send","Schedule","Scheduled","Draft","Drafts","Cancel","Close","Back","Next","Previous","Search","Filter","More options","List view","Grid view","Card view","Timeline view","Week view","Day view","Overview","Details","Curriculum","Learning goals","Learning objectives","Learning tasks","Tasks","Teaching and learning","All published","Edit","Messaging","Messages","Message","New message","Compose","New conversation","Recipients","Select recipients","Teachers","Students","Select class","Select classes","Add recipients","Type a message","Planejamento","Atividades","Criar","Salvar","Publicar","Cancelar","Editar","Voltar","Enviar","Mensagens"];
 const routeWords=["platform","courses","course","class","classes","classroom","planning","planner","planners","weekly","weeklyplanner","weeklyplanners","weekly-planners","unit","units","unitplans","unit-plans","lesson","lessons","lessonplans","lesson-plans","learningexperiences","learningengagements","learning-experiences","learning-engagements","activities","assignments","assignment","assignments-manager","announcements","school-announcements","school-library","resources","calendar","curriculum","overview","stream","cardview","listview","gridview","timelineview","create","new","edit","view","drafts","scheduled","assessment","assessments","continuum","import","messages","messaging","conversation","conversations"];
 const names=new Set(labels),words=new Set(routeWords);
@@ -40,7 +45,8 @@ type Structure=NonNullable<ReturnType<typeof structure>>;
 type Action=NonNullable<ReturnType<typeof action>>;
 type State={id:number;fingerprint:string;route:string;structure:Structure};
 type Click={session:number;page:number;from:number;to:number|null;action:Action;status:string;elapsedMs:number};
-type Report={version:1;mode:"manual-navigation-recorder";workflow:string;scope:string;sessions:number;states:State[];clicks:Click[];observations:{session:number;page:number;from:number;to:number;elapsedMs:number}[]};
+type Screenshot={session:number;page:number;state:number;click:number|null;elapsedMs:number;file:string;reason:"stable-state"|"after-click"};
+type Report={screenshots?:Screenshot[];sessionVariants?:{session:number;variant:string;visual:boolean}[];version:1;mode:"manual-navigation-recorder";workflow:string;scope:string;sessions:number;states:State[];clicks:Click[];observations:{session:number;page:number;from:number;to:number;elapsedMs:number}[]};
 const dir=resolve(".local","reports");
 const file=resolve(dir,"toddle-record-"+workflow+".json");
 await mkdir(dir,{recursive:true});
@@ -56,6 +62,10 @@ let report:Report|undefined;
 const started=Date.now(),elapsed=()=>Date.now()-started;
 const seen=new Map<string,number>(),pages=new Map<Page,number>(),last=new Map<Page,number>();
 const pending=new Map<Page,{index:number;at:number}>();
+const stable=new Map<Page,{id:number;since:number}>();
+const photographed=new Set<string>();
+const lastFinishedClick=new Map<Page,number>();
+let shotCount=0,shotFailures=0;
 const buffer:{page:Page;path:string;structure:Structure;action:Action;at:number}[]=[];
 const stopNow=()=>{stop=true;};
 process.on("SIGINT",stopNow);context.on("close",stopNow);
@@ -69,7 +79,7 @@ function state(path:string,data:Structure){
 }
 function finish(page:Page,id:number|null,status:string){
   const p=pending.get(page);if(!p)return;
-  const c=report!.clicks[p.index];c.to=id;c.status=status;pending.delete(page);dirty=true;
+  const c=report!.clicks[p.index];c.to=id;c.status=status;pending.delete(page);lastFinishedClick.set(page,p.index);dirty=true;
 }
 function ingest(){
   while(buffer.length){
@@ -85,6 +95,29 @@ function ingest(){
   }
 }
 async function persist(){if(report&&dirty){await atomicJson(file,report);dirty=false;}}
+async function photograph(page:Page,id:number,click:number|null,reason:Screenshot["reason"]){
+  if(!screenshots||stop||!report||shotCount>=maxScreenshots||page.isClosed())return;
+  const key=pageId(page)+"|"+id+"|"+(click??"state");
+  if(photographed.has(key))return;
+  try{
+    const u=new URL(page.url());if(u.origin!==origin||!allowed(u.pathname,scope))return;
+    // Only the browser viewport, never the OS desktop or login page. The operator
+    // must use a demo with fictitious data; screenshots are NOT automatically redacted.
+    const bytes=await page.screenshot({type:"jpeg",quality:78,fullPage:false,timeout:3000});
+    if(stop||page.isClosed())return;
+    const now=new URL(page.url());if(now.origin!==origin||now.pathname!==u.pathname||!allowed(now.pathname,scope))return;
+    const v=obj(await page.evaluate(expression)),data=structure(v.structure);
+    if(!data||v.path!==u.pathname||digest(u.pathname+"|"+JSON.stringify(data))!==report.states[id]?.fingerprint)return;
+    const folder="toddle-record-"+workflow+"-images/session-"+String(report.sessions).padStart(4,"0");
+    const relative=folder+"/shot-"+String(shotCount+1).padStart(4,"0")+"-state-"+id+".jpg";
+    await mkdir(resolve(dir,folder),{recursive:true});
+    await writeFile(resolve(dir,relative),bytes,{mode:0o600});
+    (report.screenshots??=[]).push({session:report.sessions,page:pageId(page),state:id,click,elapsedMs:elapsed(),file:relative,reason});
+    photographed.add(key);shotCount++;dirty=true;
+    console.log("Screenshot "+shotCount+"/"+maxScreenshots+": state "+id+(click===null?"":" after click "+(click+1)));
+    if(shotCount===maxScreenshots)console.log("Screenshot session limit reached; structural recording continues.");
+  }catch{shotFailures++;if(shotFailures<=3)console.log("Screenshot skipped; structural recording continues.");}
+}
 try{
   await context.exposeBinding("__toddleRecordClick",(source,value:unknown)=>{
     if(stop||!report||source.frame!==source.page.mainFrame())return;
@@ -106,7 +139,7 @@ try{
   report=old??{version:1,mode:"manual-navigation-recorder",workflow,scope:digest(scope),sessions:0,states:[],clicks:[],observations:[]};
   for(const s of report.states)seen.set(s.fingerprint,s.id);
   for(const c of report.clicks)if(c.status==="pending")c.status="interrupted";
-  report.sessions++;dirty=true;
+  report.sessions++;(report.sessionVariants??=[]).push({session:report.sessions,variant,visual:screenshots});dirty=true;
   // Install in existing documents as well as future ones.
   for(const p of context.pages())await p.evaluate(initScript).catch(()=>{});
   await persist();
@@ -122,7 +155,9 @@ try{
   };
   console.log("RECORDING: "+workflow+"; operate the authorized demo normally. Press Enter in terminal to finish.");
   steps[workflow].forEach((step,i)=>console.log("  "+(i+1)+". "+step));
-  console.log("No automated clicks, typed text, field values, screenshots or network interception.");
+  console.log("No automated clicks, typed text logging or network interception.");
+  if(screenshots)console.log("VISUAL MODE: local viewport screenshots may contain all visible data. Use only fictitious demo data; review/redact images before sharing. Variant: "+variant+".");
+  else console.log("Screenshots disabled. Add --screenshots to enable visual recording in the authorized fictitious demo.");
   void terminal.question("").then(stopNow,stopNow);
   while(!stop&&context.pages().some(p=>!p.isClosed())){
     ingest();
@@ -138,12 +173,26 @@ try{
         }
         last.set(p,id);
         if(event&&elapsed()-event.at>=1800)finish(p,id,report.clicks[event.index].from===id?"no-observed-change":"changed");
+        if(screenshots){
+          const previous=stable.get(p);
+          if(previous?.id!==id)stable.set(p,{id,since:elapsed()});
+          else if(elapsed()-previous.since>=450){
+            const index=lastFinishedClick.get(p);
+            const c=index===undefined?undefined:report.clicks[index];
+            const related=c?.to===id&&c.session===report.sessions&&!pending.has(p)?index!:null;
+            if(related!==null){
+              await photograph(p,id,related,"after-click");
+              // An after-click image also documents the stable state.
+              if(photographed.has(pageId(p)+"|"+id+"|"+related))photographed.add(pageId(p)+"|"+id+"|state");
+            }else if(!pending.has(p))await photograph(p,id,null,"stable-state");
+          }
+        }
       }catch{/* A navigation can replace the execution context; poll again. */}
     }
     await persist();
     await new Promise(r=>setTimeout(r,400));
   }
 }finally{
-  if(report){ingest();for(const p of pending.keys())finish(p,last.get(p)??null,"interrupted");await persist();console.log("Saved "+report.states.length+" states and "+report.clicks.length+" clicks: "+file);}
+  if(report){ingest();for(const p of pending.keys())finish(p,last.get(p)??null,"interrupted");await persist();console.log("Saved "+report.states.length+" states and "+report.clicks.length+" clicks: "+file);if(screenshots)console.log("Saved "+shotCount+" local screenshots this session; review before sharing.");}
   terminal.close();process.off("SIGINT",stopNow);await context.close().catch(()=>{});
 }
