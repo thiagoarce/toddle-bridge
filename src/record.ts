@@ -110,7 +110,18 @@ try{
   // Install in existing documents as well as future ones.
   for(const p of context.pages())await p.evaluate(initScript).catch(()=>{});
   await persist();
+  const steps:Record<string,string[]>={
+    planning:["Open a representative class","Open Planning > Weekly planners","Choose a week and open a lesson or planning editor","Inspect date, title, subject, instructions and attachment controls","If authorized, use fictitious content in the demo; otherwise stop before saving"],
+    assignment:["Open a class and its assignment or activity area","Open the creation interface","Inspect title, instructions, class, due date and attachment controls","Inspect draft and publication options; use only fictitious content"],
+    message:["Open Messaging in the demo","Open a new message or conversation","Select a fictitious test recipient","Inspect subject, composer, attachment and Send controls","Send only a fictitious message to the authorized test recipient"],
+    announcement:["Open Announcements","Open Create announcement","Inspect title, body, audience and scheduling options","Use fictitious content; publish only in the authorized demo"],
+    unit:["Open Planning > Unit planning","Open a fictitious or authorized demo unit","Inspect its tabs, learning experiences and assessment structure"],
+    materials:["Open a demo planning or activity editor","Locate Add attachment or resource picker","Use only a fictitious test file if uploading"],
+    assessment:["Open a demo class assignment or assessment editor","Inspect assessment type, criteria and due date","Use fictitious data only; do not enter real grades"],
+    free:["Navigate normally within the authorized demo"]
+  };
   console.log("RECORDING: "+workflow+"; operate the authorized demo normally. Press Enter in terminal to finish.");
+  steps[workflow].forEach((step,i)=>console.log("  "+(i+1)+". "+step));
   console.log("No automated clicks, typed text, field values, screenshots or network interception.");
   void terminal.question("").then(stopNow,stopNow);
   while(!stop&&context.pages().some(p=>!p.isClosed())){
