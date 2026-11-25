@@ -13,7 +13,8 @@
     "map": "tsx src/map.ts",
     "map:auto": "tsx src/map.ts --auto",
     "map:watch": "tsx src/map.ts --watch",
-    "map:explore": "tsx src/explore.ts"
+    "map:explore": "tsx src/explore.ts",
+    "map:record": "tsx src/record.ts"
   },
   "dependencies": {
     "fastify": "^5.0.0",
