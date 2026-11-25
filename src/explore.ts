@@ -1,5 +1,6 @@
 import { chromium, type Page, type Locator } from "playwright";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { inPlatform } from "./explore-policy.ts";
 import { atomicJson, digest, isDigest, readCheckpoint } from "./explore-checkpoint.ts";
@@ -29,12 +30,14 @@ function readLimit(name:string,fallback:number,max:number){
 const maxNewStates=readLimit("max-new-states",250,1000);
 const maxDepth=readLimit("max-depth",10,20);
 const maxAttempts=readLimit("max-attempts",400,1500);
-const report = {version:13,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:maxNewStates,depth:maxDepth,attempts:maxAttempts},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
+const report = {version:14,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:maxNewStates,depth:maxDepth,attempts:maxAttempts},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
 const fresh=process.argv.includes("--fresh");
 const requireResume=process.argv.includes("--resume");
+const teachWeekly=process.argv.includes("--teach-weekly");
+const weeklyRoutesFile=resolve(".local","weekly-routes.json");
 let resumed=false;
 if(fresh&&requireResume)throw Error("Use either --fresh or --resume, not both");
 const allClasses=process.argv.includes("--all-classes");
@@ -60,7 +63,7 @@ type Retry={id:number;path:Action[];action:Action;failures:number;reason:string}
 const retryLedger=new Map<string,Retry>();
 const actionKey=(id:number,a:Action)=>id+"|"+actionName(a);
 const completed=new Set<string>();
-const retryable=(reason:string)=>/^(?:no-visible-change|class-content-not-ready|control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
+const retryable=(reason:string)=>/^(?:weekly-planning-trigger-missing|weekly-flyout-entry-not-found|weekly-flyout-interaction-failed|no-visible-change|class-content-not-ready|control-not-ready|navigation-overlay|navigation-unstable|navigation-hidden|navigation-detached|native-click-timeout|native-click-error|capture-unavailable|restored-state-changed|navigation-or-capture-(?:network|timeout|other))$/.test(reason);
 const sampledClassLayouts=new Set<string>();
 let attempts=0;
 let platformId="";
@@ -97,7 +100,7 @@ async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
     schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11,12,13].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11,12,13,14].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -165,13 +168,16 @@ async function loadCheckpoint(){
   }
   // The actual Planning flyout uses a nested Weekly planners entry.
   // Revisit one loaded representative class on upgrade, not every equivalent class.
-  if(c.report.version<13){
+  if(c.report.version<14||teachWeekly){
     const edge=classEdges.find(e=>hasClassContent(snapshots[e.to])&&(snapshots[e.to].visualControls??[]).some(v=>v.label==="Planning"));
     if(edge){
       const path:Action[]=[{kind:"class",index:Number(edge.action.split(" ").at(-1))-1}];
       const action:Action={kind:"submenu",label:"Weekly planners"};
-      if(path.every(validAction)&&!completed.has(actionKey(edge.to,action))){
-        queue.unshift({id:edge.to,path,actions:[action]});
+      const key=actionKey(edge.to,action);
+      if(path.every(validAction)&&(!completed.has(key)||teachWeekly)){
+        if(teachWeekly)completed.delete(key);
+        retryLedger.delete(key);
+        if(!queue.some(j=>j.id===edge.to&&j.actions.some(a=>actionKey(j.id,a)===key)))queue.unshift({id:edge.to,path,actions:[action]});
       }
     }
   }
@@ -226,7 +232,9 @@ function errorKind(message:string){
 }
 async function find(page:Page,a:Action):Promise<Locator|null>{
   if(a.kind==="submenu"){
-    const byRole=page.getByRole("menuitem",{name:/^Weekly planners(?:\s+W)?$/i}).filter({visible:true});
+    const byRole=page.getByRole("menuitem",{name:/^Weekly planners(?:\s+W)?$/i})
+      .or(page.getByRole("link",{name:/^Weekly planners(?:\s+W)?$/i}))
+      .or(page.getByRole("button",{name:/^Weekly planners(?:\s+W)?$/i})).filter({visible:true});
     if(await byRole.count()===1)return byRole;
     const exact=page.getByText(a.label,{exact:true}).filter({visible:true});
     if(await exact.count()===1)return exact;
@@ -268,24 +276,106 @@ async function find(page:Page,a:Action):Promise<Locator|null>{
   return await loc.count()===1?loc:null;
 }
 
-async function click(page:Page,a:Action){
-  if(a.kind==="submenu"){
-    const planning:Action={kind:"visual",label:"Planning",region:"navigation",opener:false,interaction:"hover"};
-    let trigger=await find(page,planning);
-    if(!trigger){
-      const exact=page.getByText("Planning",{exact:true}).filter({visible:true});
-      if(await exact.count()===1)trigger=exact;
+function coursePrefix(raw:string):string|null{
+  try{
+    const u=new URL(raw);
+    if(!inPlatform(raw,origin,platformId))return null;
+    return u.pathname.match(/^\/platform\/[0-9]+\/courses\/[A-Za-z0-9_-]+(?=\/|$)/)?.[0]??null;
+  }catch{return null;}
+}
+function weeklyTarget(raw:string,base:string,start:string):boolean{
+  try{
+    const u=new URL(raw);
+    return inPlatform(raw,origin,platformId)&&coursePrefix(raw)===base&&u.pathname!==new URL(start).pathname&&!u.search&&!u.hash;
+  }catch{return false;}
+}
+async function knownWeeklyRoutes():Promise<Record<string,string>>{
+  try{
+    const obj=await readCheckpoint(weeklyRoutesFile);
+    if(obj&&typeof obj==="object"&&!Array.isArray(obj))return obj as Record<string,string>;
+  }catch{}
+  return {};
+}
+async function openWeekly(page:Page,a:Extract<Action,{kind:"submenu"}>){
+  const start=page.url(),base=coursePrefix(start);
+  if(!base){failureReason="weekly-no-course";return false;}
+  const routes=await knownWeeklyRoutes();
+  const key=digest(base);
+  const learned=routes[key];
+  const accept=()=>weeklyTarget(page.url(),base,start);
+  async function finish(){
+    for(let i=0;i<30&&!page.isClosed();i++){
+      if(accept()){await page.waitForTimeout(1200);return accept();}
+      if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";return false;}
+      await page.waitForTimeout(300);
     }
-    if(!trigger){failureReason="control-not-ready";return false;}
-    try{
-      await trigger.hover({timeout:5000});
-      // Some collapsed sidebars need a click after hover to reveal the submenu.
-      await page.waitForTimeout(900);
-      if(!await find(page,a)){
-        await trigger.click({timeout:5000});
-      }
-    }catch{failureReason="control-not-ready";return false;}
+    failureReason="no-visible-change";return false;
   }
+  if(!teachWeekly&&typeof learned==="string"&&weeklyTarget(learned,base,start)){
+    try{
+      await page.goto(learned,{waitUntil:"domcontentloaded",timeout:25000});
+      if(await finish())return true;
+    }catch{}
+    if(!inPlatform(page.url(),origin,platformId))return false;
+    if(page.url()!==start){await page.goto(start,{waitUntil:"domcontentloaded",timeout:25000});await page.waitForTimeout(1200);}
+  }
+  const planning:Action={kind:"visual",label:"Planning",region:"navigation",opener:false,interaction:"hover"};
+  async function trigger(){
+    const role=page.getByRole("button",{name:"Planning",exact:true}).filter({visible:true});
+    if(await role.count()===1)return role;
+    return await find(page,planning);
+  }
+  async function tryOption(){
+    for(let i=0;i<8;i++){
+      const option=await find(page,a);
+      if(option&&await option.isVisible()&&await option.isEnabled()){
+        const safe=await option.evaluate('(el)=>!el.closest("[aria-disabled=true],[inert],button:disabled,[contenteditable=true]")&&!el.matches(":disabled")');
+        if(!safe)return false;
+        await option.click({timeout:4000});
+        return true;
+      }
+      await page.waitForTimeout(150);
+    }
+    return false;
+  }
+  try{
+    if(!teachWeekly){
+      const first=await trigger();
+      if(!first)failureReason="weekly-planning-trigger-missing";
+      else{
+        await first.hover({timeout:5000});
+        if(await tryOption())return await finish();
+        // After the sidebar expands, find the newly rendered label rather than using the old nth locator.
+        const label=page.getByText("Planning",{exact:true}).filter({visible:true});
+        const expanded=await label.count()===1?label:await trigger();
+        if(expanded){
+          await expanded.hover({timeout:4000});
+          if(await tryOption())return await finish();
+          const freshTrigger=await trigger();
+          if(freshTrigger){await freshTrigger.click({timeout:4000});if(await tryOption())return await finish();}
+        }
+        failureReason="weekly-flyout-entry-not-found";
+      }
+    }
+  }catch{failureReason="weekly-flyout-interaction-failed";}
+  if(!teachWeekly||page.isClosed()||!inPlatform(page.url(),origin,platformId))return false;
+  // Explicit supervised teaching: the operator chooses the page, not the robot.
+  console.log("TEACH: Open Planning > Weekly planners in this same test course, then press Enter here.");
+  const rl=createInterface({input:process.stdin,output:process.stdout});
+  const abort=new AbortController();
+  const stop=()=>abort.abort();
+  page.once("close",stop);
+  try{await rl.question("Press Enter after navigating: ",{signal:abort.signal});}
+  catch{failureReason="weekly-teach-cancelled";return false;}
+  finally{page.off("close",stop);rl.close();}
+  if(!accept()){failureReason="weekly-teach-invalid-target";return false;}
+  routes[key]=page.url();
+  await atomicJson(weeklyRoutesFile,routes);
+  console.log("Weekly planners destination learned locally for this course.");
+  return await finish();
+}
+async function click(page:Page,a:Action){
+  if(a.kind==="submenu")return await openWeekly(page,a);
   const loc=await waitForControl(page,a);
   if(!loc){failureReason="control-not-ready";return false;}
   // find() already restricts candidates to known navigation cards, Calendar,
@@ -337,7 +427,11 @@ async function click(page:Page,a:Action){
     }
     if(!loaded){failureReason="class-content-not-ready";currentPath=null;return false;}
   }else await page.waitForTimeout(1400);
-  if(!inPlatform(page.url(),origin,platformId)){failureReason="destination-outside-approved-scope";currentPath=null;return false;}
+  if(!inPlatform(page.url(),origin,platformId)){
+    const u=new URL(page.url());
+    failureReason=u.origin===origin&&u.pathname.startsWith("/platform/"+platformId+"/")?"same-platform-route-excluded":"destination-outside-approved-scope";
+    currentPath=null;return false;
+  }
   // Give the client-rendered view a bounded period to finish replacing its shell.
   await page.waitForTimeout(900);
   if(!inPlatform(page.url(),origin,platformId)){halted=true;failureReason="destination-outside-approved-scope";return false;}
