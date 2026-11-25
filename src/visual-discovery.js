@@ -28,6 +28,7 @@
     if(!visible(el)||el.matches(":disabled,[aria-disabled=true],input[type=submit],input[type=reset],input[type=file],a[download]")||el.closest('[contenteditable=true]'))continue;
     if(el instanceof HTMLButtonElement&&el.form&&el.type!=="button")continue;
     const menu=el.closest("[role=menu]");
+    if(menu&&el.parentElement?.closest("[role=menuitem]"))continue;
     if(menus.length&&!menus.some(m=>m.contains(el)))continue;
     if(!menus.length&&dialogs.length&&!dialogs.some(d=>d.contains(el)))continue;
     if(el.matches('[aria-selected=true],[aria-current=page],input[type=radio]:checked'))continue;
@@ -43,10 +44,24 @@
     const description=el.getAttribute("data-tooltip-content")??el.getAttribute("data-tooltip");
     const childLabels=Array.from(el.querySelectorAll("[aria-label],[title]")).slice(0,8).flatMap(c=>[c.getAttribute("aria-label"),c.getAttribute("title")]);
     const own=Array.from(el.childNodes).filter(n=>n.nodeType===3).map(n=>n.textContent).join(" ");
-    const label=[aria,referenced,title,description,own,text,el.textContent,...childLabels].map(classify).find(Boolean);
+    const menuItem=el.matches('[role=menuitem]');
+    // Menus often combine a short heading with a long explanatory paragraph.
+    // Inspect the heading and individual rendered lines, never export raw text.
+    const menuTitles=["Unit","Unit plan","Lesson","Lesson plan","Learning experience","Learning engagement","Learning activity","Activity","Assignment","Assessment","Task","Announcement","Resource","Learning task","Unit planner","Lesson planner","Unit planning","Lesson planning","Learning experiences","Learning engagements","From scratch","From library","From template","Create from scratch","Create from library","Create from template","Import from library"];
+    const safeMenuTitle=raw=>{
+      const t=normalize(raw);
+      if(unsafe.test(t))return null;
+      return menuTitles.find(v=>v.toLowerCase()===t.toLowerCase())??null;
+    };
+    const headingTexts=menuItem?Array.from(el.querySelectorAll('h1,h2,h3,h4,h5,h6,[role=heading],strong,b,span,div')).filter(n=>n.childElementCount===0&&visible(n)).slice(0,24).map(n=>n.innerText??n.textContent):[];
+    const rawLabels=[aria,referenced,title,description,own,text,el.textContent,...childLabels];
+    const shortLabels=menuItem?[...String(text??"").split(/\r?\n/),...headingTexts]:[];
+    // Do not infer a benign action from a descendant of an explicitly destructive control.
+    if(menuItem&&[aria,referenced,title,own].some(v=>unsafe.test(normalize(v))))continue;
+    const label=rawLabels.map(classify).find(Boolean)??(menuItem?[...rawLabels,...shortLabels].map(v=>safeMenuTitle(v)??classify(v)).find(Boolean):null);
     if(!label||/^(?:home|calendar|back|next|more|menu|options|search|filter)$/i.test(label))continue;
     const opener=/^(?:create|new|add)(?:\s|$)/i.test(label);
-    if(opener&&!/^(?:create|new|add)(?: (?:unit|unit plan|lesson|activity|assignment|announcement|lesson plan|learning experience|learning engagement|assessment|task|resource))?$/i.test(label))continue;
+    if(opener&&!/^(?:create|new|add)(?: (?:unit|unit plan|lesson|activity|assignment|announcement|lesson plan|learning experience|learning engagement|assessment|task|resource))?$/i.test(label)&&!(menuItem&&safeMenuTitle(label)))continue;
     if(!semantic&&!nav&&!dialog)continue;
     const r=el.getBoundingClientRect();
     const region=menu?"menu":dialog?"dialog":nav?"navigation":"body";
