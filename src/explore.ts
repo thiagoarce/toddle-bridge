@@ -11,7 +11,7 @@ const labels = [...homeCards,...tabs,"Create activity","Create lesson plan","Hom
 const routeWords = ["platform","course","courses","class","classes","classroom","planning","planner","unit","units","lesson","lessons","activities","assignments","announcements","calendar","resources","overview","stream","curriculum","assignment-manager","assignments-manager","school-announcements","school-library","learning-experiences"];
 const cardSelector = '[role="button"][class*="ClassCardV2__container___"]';
 const featureSelector = '[role="button"][class*="ButtonCard__container___"]';
-type Action = { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string} | {kind:"visual";label:string;region:string;opener:boolean;interaction?:"hover"};
+type Action = { kind:"submenu"; label:"Weekly planners" } | { kind:"class"; index:number } | {kind:"feature"|"tab"|"calendar"|"navigation"|"editor"; label:string} | {kind:"visual";label:string;region:string;opener:boolean;interaction?:"hover"};
 type VisualCandidate={index:number;label:string;region:string;opener:boolean;x:number;y:number;width:number;height:number};
 const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=menuitem],summary,input[type=radio],nav li,nav div,nav span,[role=menu] div,[role=menu] span,[role=dialog] div,[role=dialog] span";
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
@@ -29,7 +29,7 @@ function readLimit(name:string,fallback:number,max:number){
 const maxNewStates=readLimit("max-new-states",250,1000);
 const maxDepth=readLimit("max-depth",10,20);
 const maxAttempts=readLimit("max-attempts",400,1500);
-const report = {version:12,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:maxNewStates,depth:maxDepth,attempts:maxAttempts},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
+const report = {version:13,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:maxNewStates,depth:maxDepth,attempts:maxAttempts},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
@@ -75,6 +75,7 @@ function validAction(a:unknown):a is Action{
   if(v.kind==="class")return Number.isInteger(v.index)&&Number(v.index)>=0&&Number(v.index)<12;
   if(typeof v.label!=="string"||!/^[a-zA-Z ]{1,64}$/.test(v.label))return false;
   if(v.kind==="visual")return ["body","navigation","dialog","menu"].includes(String(v.region))&&typeof v.opener==="boolean"&&(v.interaction===undefined||v.interaction==="hover");
+  if(v.kind==="submenu")return v.label==="Weekly planners";
   if(v.kind==="feature")return homeCards.includes(v.label);
   if(v.kind==="calendar")return v.label==="Calendar";
   if(v.kind==="editor")return editorOpeners.includes(v.label);
@@ -96,7 +97,7 @@ async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
     schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11,12].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11,12,13].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -116,7 +117,7 @@ async function loadCheckpoint(){
   for(const id of c.expanded)expanded.add(id);
   for(const layout of c.classLayouts)sampledClassLayouts.add(layout);
   queue.push(...c.queue);
-  for(const e of report.edges){if(e.from===e.to&&/^(?:Hover )?(?:Planning|Classroom)$/.test(e.action)&&c.report.version>=11)continue;completed.add(e.from+"|"+e.action);}
+  for(const e of report.edges){if(e.from===e.to&&/^(?:(?:Hover )?(?:Planning|Classroom)|Weekly planners)$/.test(e.action)&&c.report.version>=11)continue;completed.add(e.from+"|"+e.action);}
   for(const entry of c.retries??[])retryLedger.set(actionKey(entry.id,entry.action),entry);
   // Older versions could mark a loading shell as a completed class visit.
   const classEdges=report.edges.filter(e=>/^Class card [1-9][0-9]*$/.test(e.action));
@@ -134,7 +135,7 @@ async function loadCheckpoint(){
   }
   queue.unshift(...repairJobs);
   // Revisit previously captured but unrecognized creation menus once on upgrade.
-  if(c.report.version<11){
+  if(c.report.version<13){
     for(const e of report.edges){
       if(e.action!=="Create")continue;
       const dest=snapshots[e.to];
@@ -160,6 +161,18 @@ async function loadCheckpoint(){
       if(!path.every(validAction))continue;
       const key=actionKey(e.from,action);completed.delete(key);
       if(!queue.some(j=>j.id===e.from&&j.actions.some(a=>actionKey(j.id,a)===key)))queue.push({id:e.from,path,actions:[action]});
+    }
+  }
+  // The actual Planning flyout uses a nested Weekly planners entry.
+  // Revisit one loaded representative class on upgrade, not every equivalent class.
+  if(c.report.version<13){
+    const edge=classEdges.find(e=>hasClassContent(snapshots[e.to])&&(snapshots[e.to].visualControls??[]).some(v=>v.label==="Planning"));
+    if(edge){
+      const path:Action[]=[{kind:"class",index:Number(edge.action.split(" ").at(-1))-1}];
+      const action:Action={kind:"submenu",label:"Weekly planners"};
+      if(path.every(validAction)&&!completed.has(actionKey(edge.to,action))){
+        queue.unshift({id:edge.to,path,actions:[action]});
+      }
     }
   }
   // Retry transient failures at most twice, in later sessions, not repeatedly in this session.
@@ -212,6 +225,10 @@ function errorKind(message:string){
   return "other";
 }
 async function find(page:Page,a:Action):Promise<Locator|null>{
+  if(a.kind==="submenu"){
+    const exact=page.getByText(a.label,{exact:true}).filter({visible:true});
+    return await exact.count()===1?exact:null;
+  }
   if(a.kind==="visual"){
     const matches=(await visualCandidates(page)).filter(v=>v.label.toLowerCase()===a.label.toLowerCase()&&v.region===a.region);
     return matches.length===1?page.locator(visualSelector).nth(matches[0].index):null;
@@ -248,13 +265,30 @@ async function find(page:Page,a:Action):Promise<Locator|null>{
 }
 
 async function click(page:Page,a:Action){
+  if(a.kind==="submenu"){
+    const planning:Action={kind:"visual",label:"Planning",region:"navigation",opener:false,interaction:"hover"};
+    let trigger=await find(page,planning);
+    if(!trigger){
+      const exact=page.getByText("Planning",{exact:true}).filter({visible:true});
+      if(await exact.count()===1)trigger=exact;
+    }
+    if(!trigger){failureReason="control-not-ready";return false;}
+    try{
+      await trigger.hover({timeout:5000});
+      // Some collapsed sidebars need a click after hover to reveal the submenu.
+      const option=page.getByText(a.label,{exact:true}).filter({visible:true});
+      if(!await option.first().waitFor({state:"visible",timeout:1800}).then(()=>true).catch(()=>false)){
+        await trigger.click({timeout:5000});
+      }
+    }catch{failureReason="control-not-ready";return false;}
+  }
   const loc=await waitForControl(page,a);
   if(!loc){failureReason="control-not-ready";return false;}
   // find() already restricts candidates to known navigation cards, Calendar,
   // and exact allowlisted tab names. A layout wrapper may itself be a form,
   // dialog or toolbar; that alone does not make these controls write actions.
   const guard=await loc.evaluate(`(el) => {
-    if(el.closest('[contenteditable="true"],[aria-disabled="true"],[inert]') || el.matches(':disabled')) return "disabled-or-editor";
+    if(el.closest('[contenteditable="true"],[aria-disabled="true"],[inert],button:disabled') || el.matches(':disabled')) return "disabled-or-editor";
     if(el instanceof HTMLButtonElement && el.form && el.type!=="button") return "form-submit-or-reset";
     if(el.matches('input[type=submit],input[type=reset],input[type=file]')) return "form-action";
     if(el.matches('a[download]')) return "download";
@@ -320,6 +354,7 @@ async function actions(page:Page):Promise<Action[]>{
     for(const label of homeCards)result.push({kind:"feature",label});
     result.push({kind:"calendar",label:"Calendar"});
   }else{
+    if(visual.some(v=>v.label==="Planning"&&v.region==="navigation"))result.push({kind:"submenu",label:"Weekly planners"});
     // Discover rendered controls first. This includes text inside custom React elements.
     for(const v of visual){
       if(v.region==="navigation"&&/^(Planning|Classroom)$/i.test(v.label))result.push({kind:"visual",label:v.label,region:v.region,opener:false,interaction:"hover"});
@@ -333,7 +368,7 @@ async function actions(page:Page):Promise<Action[]>{
   for(const a of result){
     const name=actionName(a);
     if(names.has(name))continue;
-    if(a.kind==="visual"){
+    if(a.kind==="visual"||a.kind==="submenu"){
       names.add(name);available.push(a);continue;
     }
     const loc=await find(page,a);
@@ -476,7 +511,7 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
         else{
           if(item.fresh||!expanded.has(item.id))await enqueue(nextPath,item.id);
           report.edges.push({from:job.id,to:item.id,action:actionName(a)});
-          if(item.id===job.id&&/^(?:Hover )?(?:Planning|Classroom)$/.test(actionName(a))){
+          if(item.id===job.id&&/^(?:(?:Hover )?(?:Planning|Classroom)|Weekly planners)$/.test(actionName(a))){
             report.exploration.noChangeActions++;
             outcome="no-visible-change";
             console.log("No visible navigation change: "+actionName(a));
