@@ -20,6 +20,7 @@ if(!["announcement","planning"].includes(workflow))throw Error("Supported workfl
 const title=workflow==="announcement"?required("title",100):required("block",100);
 const week=workflow==="planning"?required("week",100):null;
 const time=workflow==="planning"?required("time",100):null;
+const day=workflow==="planning"?required("day",100):null;
 const planner=workflow==="planning"?required("planner",100):null;
 const origin="https://web.toddleapp.com";
 const rl=createInterface({input:process.stdin,output:process.stdout});
@@ -51,7 +52,7 @@ try{
     console.log("Open the Toddle home screen (or the empty Create announcement editor).");
   }else{
     console.log("Open the correct weekly planner, week and an EMPTY test block. Do not open Edit blocks.");
-    console.log("Expected planner: "+planner+" | week: "+week+" | block: "+title+" | time: "+time);
+    console.log("Expected planner: "+planner+" | week: "+week+" | day: "+day+" | block: "+title+" | time: "+time);
     console.log("Planning text may autosave immediately.");
   }
   await rl.question("When the browser is ready, press Enter: ");
@@ -85,10 +86,13 @@ try{
     console.log("Title and body verified in the form. Not saved or published by this command.");
   }else{
     if(!/\/weekly\/?$/.test(new URL(page.url()).pathname))throw Error("Open a weekly planner first.");
-    for(const [label,description] of [[planner,"planner"],[week,"week"]]){
-      const matches=visible(page.getByText(label,{exact:true}));
-      if(await matches.count()===0)throw Error("Expected "+description+" not visible.");
+    async function checkCalendar(){
+      for(const [label,description] of [[planner,"planner"],[week,"week"],[day,"day"]]){
+        const matches=visible(page.getByText(label,{exact:true}));
+        if(await matches.count()===0)throw Error("Expected "+description+" not visible.");
+      }
     }
+    await checkCalendar();
     const editor=await unique(page.locator('div[contenteditable="true"]'),"planning description");
     // Find a nearby ancestor containing the block header and the observed Upload control.
     // Exact visible block title and time must both occur in that same editor container.
@@ -103,7 +107,9 @@ try{
       return false;
     },{title,time});
     if(!await matchesBlock()||!await empty(editor))throw Error("Block identity not verified, or description is not empty.");
+    console.log("Verify manually that the open block belongs to the expected day; the pilot checks the visible calendar and block header, not their DOM association.");
     if(await rl.question("Type PREPARAR to fill this test block (may autosave): ")!=="PREPARAR")returnExit();
+    await checkCalendar();
     if(!sameScope()||!await matchesBlock()||!await empty(editor))throw Error("Block changed.");
     await editor.fill(body);
     await checkFilled(editor,body);
