@@ -289,7 +289,7 @@ async function capture(page:Page){
   if(!inspected)return null;
   const {snapshot,key,dialog,visualCount}=inspected;
   report.exploration.visualCandidates+=visualCount;
-  if(seen.has(key)){report.exploration.duplicates++;return {id:seen.get(key)!,fresh:false};}
+  if(seen.has(key)){const id=seen.get(key)!;stateUrls.set(id,page.url());report.exploration.duplicates++;return {id,fresh:false};}
   const id=report.snapshots.length;
   report.snapshots.push(snapshot);seen.set(key,id);stateKeys.set(id,key);stateUrls.set(id,page.url());stateDialogs.set(id,dialog);
   console.log("Captured state "+(id+1)+"/"+report.limits.states+"; requests observed: "+report.network.observed);
@@ -317,9 +317,9 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
     const openMenu=await page.locator("[role=menu]:visible").count()>0;
     if(!openMenu&&stateDialogs.get(id)&&await page.locator("[role=dialog] input:not([type=hidden]):not([type=radio]):not([type=checkbox]):visible,[role=dialog] textarea:visible,[role=dialog] [contenteditable=true]:visible").count()>0)return;
     if(!openMenu&&last?.kind==="visual"&&last.opener&&await page.locator("textarea:visible,[contenteditable=true]:visible").count()>0)return;
-    expanded.add(id);
     const prior=new Set(path.map(actionName));
     const candidates=(await actions(page)).filter(a=>!prior.has(actionName(a)));
+    expanded.add(id);
     if(path.length===1&&last?.kind==="class"&&!allClasses){
       const snapshot=report.snapshots[id];
       const signatures=(snapshot.controls as {control:{role:string;name:string|null;type:string|null;editable:boolean}}[]).map(c=>JSON.stringify([c.control.role,c.control.name,c.control.type,c.control.editable])).sort();
@@ -390,9 +390,9 @@ async function explore(page:Page,path:Action[],id:number):Promise<void>{
         const item=await capture(page);
         if(!item){outcome="capture-unavailable";report.diagnostics.push({action:actionName(a),reason:outcome});}
         else{
+          if(item.fresh||!expanded.has(item.id))await enqueue(nextPath,item.id);
           report.edges.push({from:job.id,to:item.id,action:actionName(a)});
           completed.add(key);outcome="success";
-          if(item.fresh)await enqueue(nextPath,item.id);
         }
       }
     }catch(err){
@@ -477,6 +477,7 @@ if(!process.argv.includes("--authorized-test-demo")){
     }catch{report.startup.ui="unavailable";}}
     console.log("Startup stopped at "+report.startup.stage+"; UI: "+report.startup.ui+".");
     if(report.startup.stage==="load-checkpoint")console.log("Checkpoint not resumed. Verify the same authorized test platform, class mode, and checkpoint file, or use --fresh to archive and start a new map.");
+    process.exitCode=1;
   }finally{
     await persist();await context.close().catch(()=>{});
     console.log("Captured "+report.snapshots.length+" states; "+report.network.observed+" requests observed (no interception).");
