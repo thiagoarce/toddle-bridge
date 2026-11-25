@@ -37,6 +37,7 @@ const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
 const fresh=process.argv.includes("--fresh");
 const requireResume=process.argv.includes("--resume");
 const teachWeekly=process.argv.includes("--teach-weekly");
+let taughtWeeklyThisRun=false;
 const weeklyRoutesFile=resolve(".local","weekly-routes.json");
 let resumed=false;
 if(fresh&&requireResume)throw Error("Use either --fresh or --resume, not both");
@@ -311,7 +312,8 @@ async function openWeekly(page:Page,a:Extract<Action,{kind:"submenu"}>){
     }
     failureReason="no-visible-change";return false;
   }
-  if(!teachWeekly&&typeof learned==="string"&&weeklyTarget(learned,base,start)){
+  const manual=teachWeekly&&!taughtWeeklyThisRun;
+  if(!manual&&typeof learned==="string"&&weeklyTarget(learned,base,start)){
     try{
       await page.goto(learned,{waitUntil:"domcontentloaded",timeout:25000});
       if(await finish())return true;
@@ -324,6 +326,12 @@ async function openWeekly(page:Page,a:Extract<Action,{kind:"submenu"}>){
     const role=page.getByRole("button",{name:"Planning",exact:true}).filter({visible:true});
     if(await role.count()===1)return role;
     return await find(page,planning);
+  }
+  async function finishAndLearn(){
+    if(!await finish())return false;
+    routes[key]=page.url();
+    await atomicJson(weeklyRoutesFile,routes);
+    return true;
   }
   async function tryOption(){
     for(let i=0;i<8;i++){
@@ -339,26 +347,26 @@ async function openWeekly(page:Page,a:Extract<Action,{kind:"submenu"}>){
     return false;
   }
   try{
-    if(!teachWeekly){
+    if(!manual){
       const first=await trigger();
       if(!first)failureReason="weekly-planning-trigger-missing";
       else{
         await first.hover({timeout:5000});
-        if(await tryOption())return await finish();
+        if(await tryOption())return await finishAndLearn();
         // After the sidebar expands, find the newly rendered label rather than using the old nth locator.
         const label=page.getByText("Planning",{exact:true}).filter({visible:true});
         const expanded=await label.count()===1?label:await trigger();
         if(expanded){
           await expanded.hover({timeout:4000});
-          if(await tryOption())return await finish();
+          if(await tryOption())return await finishAndLearn();
           const freshTrigger=await trigger();
-          if(freshTrigger){await freshTrigger.click({timeout:4000});if(await tryOption())return await finish();}
+          if(freshTrigger){await freshTrigger.click({timeout:4000});if(await tryOption())return await finishAndLearn();}
         }
         failureReason="weekly-flyout-entry-not-found";
       }
     }
   }catch{failureReason="weekly-flyout-interaction-failed";}
-  if(!teachWeekly||page.isClosed()||!inPlatform(page.url(),origin,platformId))return false;
+  if(!manual||page.isClosed()||!inPlatform(page.url(),origin,platformId))return false;
   // Explicit supervised teaching: the operator chooses the page, not the robot.
   console.log("TEACH: Open Planning > Weekly planners in this same test course, then press Enter here.");
   const rl=createInterface({input:process.stdin,output:process.stdout});
@@ -369,10 +377,10 @@ async function openWeekly(page:Page,a:Extract<Action,{kind:"submenu"}>){
   catch{failureReason="weekly-teach-cancelled";return false;}
   finally{page.off("close",stop);rl.close();}
   if(!accept()){failureReason="weekly-teach-invalid-target";return false;}
-  routes[key]=page.url();
-  await atomicJson(weeklyRoutesFile,routes);
+  if(!await finishAndLearn())return false;
+  taughtWeeklyThisRun=true;
   console.log("Weekly planners destination learned locally for this course.");
-  return await finish();
+  return true;
 }
 async function click(page:Page,a:Action){
   if(a.kind==="submenu")return await openWeekly(page,a);
