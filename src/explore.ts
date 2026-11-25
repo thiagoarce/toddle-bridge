@@ -17,7 +17,19 @@ const visualSelector="button,a[href],[role=button],[role=link],[role=tab],[role=
 const editorOpeners=["Create assignment","Create announcement","Create lesson plan","Create activity"];
 type Snapshot = {route:string; scanned:number; truncated:boolean; controls:unknown[];visualControls?:Omit<VisualCandidate,"index">[];};
 type Capture = {scanned:number;truncated:boolean;controls:unknown[];candidates:unknown[]}|null;
-const report = {version:11,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:80,depth:5,attempts:120},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
+function readLimit(name:string,fallback:number,max:number){
+  const flag="--"+name;
+  const index=process.argv.indexOf(flag);
+  if(index===-1)return fallback;
+  const raw=process.argv[index+1]??"";
+  const value=Number(raw);
+  if(!/^\d+$/.test(raw)||!Number.isSafeInteger(value)||value<1||value>max)throw Error(flag+" must be an integer between 1 and "+max);
+  return value;
+}
+const maxNewStates=readLimit("max-new-states",250,1000);
+const maxDepth=readLimit("max-depth",10,20);
+const maxAttempts=readLimit("max-attempts",400,1500);
+const report = {version:12,mode:"supervised-demo-explorer",snapshots:[] as Snapshot[],edges:[] as {from:number;to:number;action:string}[],diagnostics:[] as {action:string;reason:string}[],network:{interception:false,observed:0,requestKinds:{} as Record<string,number>,httpErrors:{} as Record<string,number>,failedKinds:{} as Record<string,number>},startup:{stage:"not-started",ui:"unknown",pageErrors:{} as Record<string,number>},limits:{states:maxNewStates,depth:maxDepth,attempts:maxAttempts},exploration:{strategy:"priority-breadth-first-rendered-text",equivalentClassLayouts:0,visualCandidates:0,duplicates:0,queued:0,attempts:0,resumed:false,previousAttempts:0,knownActionsSkipped:0,retriesQueued:0,retriesExhausted:0,incompleteClassRepairs:0,menuRepairs:0,unresolvedMenus:0,noChangeActions:0}};
 const dir=resolve(".local","reports"); await mkdir(dir,{recursive:true});
 const output=resolve(dir,"toddle-map-explore.json");
 const checkpointFile=resolve(dir,"toddle-explore-checkpoint.json");
@@ -84,7 +96,7 @@ async function loadCheckpoint(){
   const c=await readCheckpoint(checkpointFile) as {
     schema:number;scope:string;allClasses:boolean;report:typeof report;seen:[string,number][];dialogs:[number,boolean][];expanded:number[];classLayouts:string[];queue:Pending[];retries?:Retry[];
   };
-  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
+  if(!c||c.schema!==1||c.scope!==digest(home)||c.allClasses!==allClasses||![8,9,10,11,12].includes(c.report?.version))throw Error("Checkpoint incompatible with this platform, version or class mode");
   const snapshots=c.report.snapshots;
   if(!Array.isArray(snapshots)||!snapshots.length||snapshots.length>10000||!Array.isArray(c.report.edges)||!Array.isArray(c.report.diagnostics))throw Error("Invalid checkpoint report");
   const validId=(id:unknown)=>Number.isInteger(id)&&Number(id)>=0&&Number(id)<snapshots.length;
@@ -98,7 +110,7 @@ async function loadCheckpoint(){
   report.diagnostics=c.report.diagnostics;
   report.exploration={...report.exploration,...c.report.exploration,resumed:true,previousAttempts:(c.report.exploration.previousAttempts??0)+c.report.exploration.attempts,attempts:0,queued:c.queue.length,retriesQueued:0,retriesExhausted:0};
   // Network counters describe this execution only; map and progress are cumulative.
-  report.limits.states=snapshots.length+80;
+  report.limits.states=snapshots.length+maxNewStates;
   for(const [key,id] of c.seen){seen.set(key,id);stateKeys.set(id,key);}
   for(const [id,dialog] of c.dialogs)stateDialogs.set(id,dialog);
   for(const id of c.expanded)expanded.add(id);
@@ -544,7 +556,13 @@ if(!process.argv.includes("--authorized-test-demo")){
     reportStarted=true;
     const initialState=resumed?{id:0,fresh:false}:await capture(page);
     report.startup.stage=initialState?"explore":"capture-empty";
-    if(initialState){await explore(page,[],initialState.id);report.startup.stage=halted||page.isClosed()?"stopped":report.exploration.queued>0||attempts>=report.limits.attempts||report.snapshots.length>=report.limits.states?"limit-reached":"finished";}
+    if(initialState){
+      console.log("Session budget: "+maxNewStates+" new states, "+maxAttempts+" attempts, depth "+maxDepth+".");
+      await explore(page,[],initialState.id);
+      report.startup.stage=halted||page.isClosed()?"stopped":report.exploration.queued>0?"limit-reached":"finished";
+      if(report.startup.stage==="finished")console.log("Exploration queue exhausted: "+retryLedger.size+" recorded unresolved actions. This does not imply full platform coverage.");
+      else if(report.startup.stage==="limit-reached")console.log("Session limit reached; pending paths are preserved in the checkpoint.");
+    }
   }catch(err){
     report.diagnostics.push({action:"startup:"+report.startup.stage,reason:errorKind(err instanceof Error?err.message:"")});
     const active=context.pages().at(-1);
