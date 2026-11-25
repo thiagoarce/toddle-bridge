@@ -47,9 +47,9 @@
     const menuItem=el.matches('[role=menuitem]');
     // Menus often combine a short heading with a long explanatory paragraph.
     // Inspect the heading and individual rendered lines, never export raw text.
-    const menuTitles=["Unit","Unit plan","Lesson","Lesson plan","Learning experience","Learning engagement","Learning activity","Activity","Assignment","Assessment","Task","Announcement","Resource","Learning task","Unit planner","Lesson planner","Unit planning","Lesson planning","Learning experiences","Learning engagements","From scratch","From library","From template","Create from scratch","Create from library","Create from template","Import from library"];
+    const menuTitles=["Interdisciplinary unit","Subject specific unit","Import from MB Library","Weekly planners","Unit","Unit plan","Lesson","Lesson plan","Learning experience","Learning engagement","Learning activity","Activity","Assignment","Assessment","Task","Announcement","Resource","Learning task","Unit planner","Lesson planner","Unit planning","Lesson planning","Learning experiences","Learning engagements","From scratch","From library","From template","Create from scratch","Create from library","Create from template","Import from library"];
     const safeMenuTitle=raw=>{
-      const t=normalize(raw);
+      const t=normalize(raw).replace(/\s+[UW]$/,"");
       if(unsafe.test(t))return null;
       return menuTitles.find(v=>v.toLowerCase()===t.toLowerCase())??null;
     };
